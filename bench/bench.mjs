@@ -8,7 +8,7 @@
 //                        [--arms relay,single]
 //                        [--runs 1] [--model claude-sonnet-5] [--models worker=a,review=b,accept=c]
 //                        [--efforts worker=medium,review=high] [--judge-model <model>]
-//                        [--out bench/results/<timestamp>] [--keep]
+//                        [--out bench/results/<timestamp>] [--keep] [--claude <path-to-claude-binary>]
 //
 // This spends real tokens. Without --yes it only prints the estimate.
 import fs from "node:fs";
@@ -32,6 +32,7 @@ const roleEfforts = Object.fromEntries((args.efforts ? String(args.efforts).spli
 const judgeModel = args["judge-model"] || roleModels.review || model;
 const outDir = path.resolve(args.out || path.join(HERE, "results", new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)));
 const timeoutMin = Number(args.timeout || 45);
+const claudeExe = args.claude ? String(args.claude) : "claude";
 
 // --describe: instead of a fixed plan, each relay repo gets its plan written by a
 // `relay plan` session on the plan role's model, so planning is measured too.
@@ -112,12 +113,12 @@ function seedRepo(label) {
 function runRelay(repo) {
   fs.writeFileSync(
     path.join(repo, ".relay", "config.json"),
-    JSON.stringify({ agent: "claude", model, models: roleModels, efforts: roleEfforts, verify, reviewEvery: 3, acceptance: true, sessionTimeoutMinutes: timeoutMin, maxConsecutiveFailures: 2 }, null, 2),
+    JSON.stringify({ agent: "claude", claude: claudeExe, model, models: roleModels, efforts: roleEfforts, verify, reviewEvery: 3, acceptance: true, sessionTimeoutMinutes: timeoutMin, maxConsecutiveFailures: 2 }, null, 2),
   );
   if (describe) {
     const p = spawnSync(process.execPath, [RELAY, "plan", describe], { cwd: repo, encoding: "utf8", env: cleanEnv(), stdio: ["ignore", "pipe", "inherit"] });
     fs.writeFileSync(path.join(outDir, `${path.basename(repo)}.plan.log`), p.stdout);
-    if (p.status !== 0) console.error(`plan session failed (exit ${p.status}); continuing with whatever was written`);
+    if (p.status !== 0) die(`plan session failed (exit ${p.status}); see ${path.join(repo, ".relay", "logs")}`);
     console.log(p.stdout.trim().split("\n").filter((l) => /^\s+\[/.test(l)).join("\n"));
     git(repo, ["add", "-A"]);
     git(repo, ["commit", "-qm", "plan: written by relay plan session"]);
@@ -182,7 +183,7 @@ function runJudge(repo, base) {
 }
 
 function claude(cwd, prompt, mdl, extra, minutes) {
-  const r = spawnSync("claude", ["-p", "--output-format", "json", "--model", mdl, ...extra], {
+  const r = spawnSync(claudeExe, ["-p", "--output-format", "json", "--model", mdl, ...extra], {
     cwd,
     input: prompt,
     encoding: "utf8",

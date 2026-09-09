@@ -4,3 +4,4 @@ node_modules/
 .relay/runner.pid
 .relay/runner.out
 .DS_Store
+bench/results/
