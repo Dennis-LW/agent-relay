@@ -175,6 +175,9 @@ test("relay init --models validates roles and writes them; relay plan runs one s
   const call = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "fake-calls.log"), "utf8").trim().split("\n").pop());
   assert.equal(call.kind, "plan");
   assert.equal(call.model, "plan-m");
+  const st = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "state.json"), "utf8"));
+  assert.equal(st.runs.at(-1).kind, "plan", "plan session usage is recorded like any other");
+  assert.equal(st.runs.at(-1).model, "plan-m");
   assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" }).includes("PLAN.md"), true, "plan is left uncommitted for review");
 });
 

@@ -561,6 +561,9 @@ async function cmdPlan(proj, args) {
   }
   log(`plan session — agent ${proj.cfg.agent}, model ${modelFor(proj.cfg, "plan") || "(cli default)"}`);
   const res = await planSession(proj, description);
+  const st = loadState(proj.statePath);
+  record(st, "plan", res.isError ? "error" : "ok", res);
+  writeJson(proj.statePath, st);
   const plan = exists(proj.planPath) ? parsePlan(proj.planPath) : { tasks: [] };
   if (res.isError || !plan.tasks.length) {
     console.error(`plan session ${res.isError ? "failed" : "wrote no tasks"}; see ${path.relative(proj.root, res.logBase)}.result.md`);
