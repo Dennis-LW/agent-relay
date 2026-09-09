@@ -1,12 +1,14 @@
 # claude-relay
 
-把長時間、多步驟的開發任務，拆成一連串**短而乾淨的 Claude Code session 接力**完成：規劃 → 實作 → 審查 → 驗收，所有狀態都放在 git 裡。品質不會因為 context 變長而衰退，打到用量上限也只是暫停，不是中斷。
+把長時間、多步驟的開發任務，拆成一連串**短而乾淨的 agent session 接力**完成：規劃 → 實作 → 審查 → 驗收，所有狀態都放在 git 裡。品質不會因為 context 變長而衰退，打到用量上限也只是暫停，不是中斷。
+
+支援 **Claude Code**（預設）、**OpenAI Codex CLI**、**Gemini CLI**，或任何能無人值守執行的 CLI agent。skill 本身採用開放的 [Agent Skills](https://agentskills.io) `SKILL.md` 格式。
 
 [English](README.md)
 
 ## 為什麼需要
 
-單一長 session 會慢慢變差：context 塞滿過時的推理、早期的錯誤變成「事實」、一次 usage limit 就讓整個作業停擺。自動壓縮只能延後這件事，不能解決。
+單一長 agent session 會慢慢變差：context 塞滿過時的推理、早期的錯誤變成「事實」、一次 usage limit 就讓整個作業停擺。自動壓縮只能延後這件事，不能解決。
 
 解法是結構性的：**讓每個 session 都很短，把狀態放到 session 之外。**
 
@@ -25,8 +27,8 @@ PLAN.md ──► runner ──► 新 session：做 T1，驗證，commit，打�
 
 ## 需求
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI（`claude` 在 PATH 上）
-- Node.js 18 以上（能跑 Claude Code 的環境一定有）
+- 至少一個 agent CLI 在 PATH 上：[Claude Code](https://docs.anthropic.com/en/docs/claude-code)（`claude`）、[Codex CLI](https://github.com/openai/codex)（`codex`）或 [Gemini CLI](https://github.com/google-gemini/gemini-cli)（`gemini`）
+- Node.js 18 以上（三者都是 npm 安裝，環境一定有）
 - git
 
 支援 macOS、Linux、Windows，零依賴。
@@ -42,7 +44,22 @@ claude plugin install relay@claude-relay
 
 之後每個專案都有 `/relay` 這個 skill 可用。
 
-### 手動
+### Codex CLI
+
+Codex 從 `~/.codex/skills` 讀取 skill。clone 此 repo 後把 `skills/relay` 複製或 symlink 過去：
+
+```
+git clone https://github.com/okshoptw/claude-relay
+ln -s "$PWD/claude-relay/skills/relay" ~/.codex/skills/relay     # Windows 用 mklink /D
+```
+
+在專案裡執行 `relay init --agent codex`（或在 `.relay/config.json` 設 `"agent": "codex"`），session 會以 `codex exec --full-auto` 執行。
+
+### Gemini CLI 或其他 agent
+
+規劃用該 CLI 本身，執行交給 runner：`relay init --agent gemini` 會以 `gemini --yolo -p <prompt>` 跑 session。其他工具設 `"agent": "custom"` 加 `"command": ["my-agent", "--auto", "{prompt}"]`（省略 `{prompt}` 則改由 stdin 餵入）。runner 只要求 agent 能改檔、跑指令、commit；成功與否看勾選與新 commit，不看 agent 的輸出文字。
+
+### 手動（Claude Code）
 
 clone 此 repo，把 `skills/relay` 複製或 symlink 到 `~/.claude/skills/relay`。
 
@@ -125,7 +142,7 @@ node ~/.claude/skills/relay/scripts/relay.mjs status   # 若用 npm 安裝，直
 ## CLI
 
 ```
-relay init [--plan <path>] [--verify "<cmd>"]   在目前專案建立 .relay/
+relay init [--plan <path>] [--verify "<cmd>"] [--agent <name>]   在目前專案建立 .relay/
 relay status                                    進度、下一個任務、runner 狀態、交接內容
 relay next                                      印出下一個未完成任務
 relay run [--once] [--dry-run] [--detach]       跑接力迴圈（預設前景）
@@ -139,10 +156,12 @@ relay stop                                      停止背景 runner
 | `plan` | `.relay/PLAN.md` | 任務檔 |
 | `handoff` | `.relay/HANDOFF.md` | 交接檔 |
 | `verify` | `""` | 打勾前必須通過的指令 |
-| `claude` | `claude` | CLI 執行檔 |
-| `model` | `""` | session 的 `--model` |
-| `permissionMode` | `acceptEdits` | session 的 `--permission-mode` |
-| `extraArgs` | `[]` | 額外 CLI 參數，例如 `["--effort", "high"]` |
+| `agent` | `claude` | `claude` \| `codex` \| `gemini` \| `custom` |
+| `command` | `[]` | `custom` 用：argv，`{prompt}` 會被代換，沒有則由 stdin 餵入 |
+| `claude` | `claude` | 所選 preset 的執行檔覆寫（例如完整路徑） |
+| `model` | `""` | session 的模型參數 |
+| `permissionMode` | `acceptEdits` | Claude Code 的 `--permission-mode` |
+| `extraArgs` | `[]` | 附加到每個 session 的額外 CLI 參數 |
 | `sessionTimeoutMinutes` | `45` | 每個 session 的強制逾時 |
 | `reviewEvery` | `3` | 每完成幾項就審查一次（0 = 不審） |
 | `acceptance` | `true` | 最後是否跑驗收 session |
@@ -154,7 +173,7 @@ relay stop                                      停止背景 runner
 
 ## 權限與安全
 
-session 以 `--permission-mode acceptEdits` 無人值守執行：檔案編輯自動核准，Bash 指令仍遵守你的 allow/deny 規則。要完全無人值守可設 `"permissionMode": "bypassPermissions"`，但只建議在你信任的沙箱裡。worker 被明確要求不 push、不改寫歷史。
+session 無人值守執行。Claude Code 用 `--permission-mode acceptEdits`（編輯自動核准，Bash 仍遵守 allow/deny 規則；`"permissionMode": "bypassPermissions"` 只建議在信任的沙箱裡用）。Codex 用 `exec --full-auto`、Gemini 用 `--yolo`，都是各自的無人值守模式。worker 被明確要求不 push、不改寫歷史。
 
 每個 session 的 prompt 與結果都會寫到 `.relay/logs/`。
 

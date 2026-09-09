@@ -1,6 +1,6 @@
 {
   "name": "relay",
-  "description": "Run long, multi-step coding tasks as a relay of short fresh Claude Code sessions — plan, work, review, accept — with durable state in git, so quality doesn't decay and rate-limit pauses just resume.",
+  "description": "Run long, multi-step coding tasks as a relay of short fresh agent sessions (Claude Code, Codex CLI, Gemini CLI or any CLI agent) — plan, work, review, accept — with durable state in git, so quality doesn't decay and rate-limit pauses just resume.",
   "version": "0.1.0",
   "author": { "name": "dennis" },
   "homepage": "https://github.com/okshoptw/claude-relay",

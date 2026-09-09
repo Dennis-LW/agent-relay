@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// claude-relay — run long tasks as a relay of short, fresh Claude Code sessions.
+// claude-relay — run long tasks as a relay of short, fresh agent sessions (Claude Code, Codex, Gemini or any CLI agent).
 // Zero dependencies. Node >= 18. Works on macOS, Linux and Windows.
 
 import { spawn, spawnSync } from "node:child_process";
@@ -19,9 +19,11 @@ const DEFAULT_CONFIG = {
   plan: ".relay/PLAN.md",
   handoff: ".relay/HANDOFF.md",
   verify: "",
-  claude: "claude",
+  agent: "claude", // claude | codex | gemini | custom
+  command: [], // custom agent: argv, "{prompt}" is replaced by the prompt (or omit it to feed stdin)
+  claude: "claude", // executable override for the selected preset
   model: "",
-  permissionMode: "acceptEdits",
+  permissionMode: "acceptEdits", // claude only
   extraArgs: [],
   sessionTimeoutMinutes: 45,
   reviewEvery: 3,
@@ -221,23 +223,22 @@ function runClaude(proj, prompt, kind) {
   const logBase = path.join(logsDir, `${stamp}-${kind}`);
   fs.writeFileSync(`${logBase}.prompt.md`, prompt);
 
-  const args = ["-p", "--output-format", "json", "--permission-mode", cfg.permissionMode];
-  if (cfg.model) args.push("--model", cfg.model);
-  args.push(...(cfg.extraArgs || []));
+  const { exe, args, viaStdin } = agentCommand(cfg, prompt);
 
   return new Promise((resolve) => {
-    const child = spawn(cfg.claude, args, {
+    const child = spawn(exe, args, {
       cwd: root,
-      shell: IS_WIN, // resolves claude.cmd on Windows
+      shell: IS_WIN, // resolves .cmd shims on Windows
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...childEnv(), CLAUDE_RELAY: "1", CLAUDE_RELAY_KIND: kind },
+      env: { ...childEnv(), CLAUDE_RELAY: "1", CLAUDE_RELAY_KIND: kind, RELAY_KIND: kind },
     });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     child.stdout.on("data", (d) => (stdout += d));
     child.stderr.on("data", (d) => (stderr += d));
-    child.stdin.end(prompt);
+    if (viaStdin) child.stdin.end(prompt);
+    else child.stdin.end();
 
     const timer = setTimeout(() => {
       timedOut = true;
@@ -269,6 +270,44 @@ function runClaude(proj, prompt, kind) {
       resolve({ code: -1, timedOut: false, isError: true, rateLimited: false, resultText: "", stderr: String(e), logBase });
     });
   });
+}
+
+// Build the argv for the configured agent CLI. Success is judged by side
+// effects (tick + commit), so any CLI that can edit files and run commands
+// unattended works here.
+function agentCommand(cfg, prompt) {
+  const extra = cfg.extraArgs || [];
+  const model = cfg.model ? ["--model", cfg.model] : [];
+  switch (cfg.agent) {
+    case "claude":
+      return {
+        exe: cfg.claude || "claude",
+        args: ["-p", "--output-format", "json", "--permission-mode", cfg.permissionMode, ...model, ...extra],
+        viaStdin: true,
+      };
+    case "codex":
+      // OpenAI Codex CLI: `codex exec` runs non-interactively; "-" reads the prompt from stdin.
+      return {
+        exe: cfg.claude === "claude" ? "codex" : cfg.claude,
+        args: ["exec", "--full-auto", ...model, ...extra, "-"],
+        viaStdin: true,
+      };
+    case "gemini":
+      // Google Gemini CLI: -p prompt, --yolo auto-approves tool calls.
+      return {
+        exe: cfg.claude === "claude" ? "gemini" : cfg.claude,
+        args: ["--yolo", ...(cfg.model ? ["-m", cfg.model] : []), ...extra, "-p", prompt],
+        viaStdin: false,
+      };
+    case "custom": {
+      if (!cfg.command?.length) throw new Error('agent "custom" needs "command": [exe, ...args] in .relay/config.json');
+      const hasPlaceholder = cfg.command.some((a) => a.includes("{prompt}"));
+      const args = cfg.command.slice(1).map((a) => a.replace("{prompt}", prompt));
+      return { exe: cfg.command[0], args, viaStdin: !hasPlaceholder };
+    }
+    default:
+      throw new Error(`unknown agent "${cfg.agent}" (claude | codex | gemini | custom)`);
+  }
 }
 
 // Claude Code refuses to start when it thinks it is nested inside another
@@ -335,6 +374,7 @@ function cmdInit(cwd, flags) {
   const merged = { ...DEFAULT_CONFIG, ...cfg };
   if (flags.plan) merged.plan = flags.plan;
   if (flags.verify) merged.verify = flags.verify;
+  if (flags.agent) merged.agent = flags.agent;
   writeJson(cfgPath, merged);
   const tplDir = path.join(SKILL_DIR, "templates");
   const planPath = path.resolve(root, merged.plan);
@@ -353,6 +393,7 @@ function cmdInit(cwd, flags) {
   log(`plan:    ${merged.plan}`);
   log(`handoff: ${merged.handoff}`);
   log(`verify:  ${merged.verify || "(not set)"}`);
+  log(`agent:   ${merged.agent}`);
   log("Next: fill in the plan (or run /relay plan inside Claude Code), then `relay run`.");
 }
 
@@ -453,7 +494,7 @@ async function cmdRun(proj, flags) {
     process.exit(2);
   }
 
-  log(`runner start — plan ${path.relative(proj.root, proj.planPath)}, timeout ${cfg.sessionTimeoutMinutes}m/session`);
+  log(`runner start — agent ${cfg.agent}, plan ${path.relative(proj.root, proj.planPath)}, timeout ${cfg.sessionTimeoutMinutes}m/session`);
 
   for (;;) {
     const st = loadState(proj.statePath);
@@ -576,10 +617,11 @@ async function handleFailure(proj, state, res, why = "") {
 // main
 // ---------------------------------------------------------------------------
 
-const HELP = `claude-relay — run long tasks as a relay of short, fresh Claude Code sessions.
+const HELP = `claude-relay — run long tasks as a relay of short, fresh agent sessions (Claude Code, Codex, Gemini or any CLI agent).
 
 Usage:
-  relay init [--plan <path>] [--verify "<cmd>"]   create .relay/ in the current project
+  relay init [--plan <path>] [--verify "<cmd>"] [--agent claude|codex|gemini|custom]
+                                                  create .relay/ in the current project
   relay status                                    progress, next task, runner state, handoff
   relay next                                      print the next open task
   relay run [--once] [--dry-run] [--detach]       run the relay loop (foreground by default)

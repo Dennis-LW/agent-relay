@@ -1,12 +1,14 @@
 # claude-relay
 
-Run long, multi-step coding tasks as a **relay of short, fresh Claude Code sessions** — plan → worker → review → acceptance — with all state kept in git. Quality does not decay over a long context, and a rate-limit pause is just a pause.
+Run long, multi-step coding tasks as a **relay of short, fresh agent sessions** — plan → worker → review → acceptance — with all state kept in git. Quality does not decay over a long context, and a rate-limit pause is just a pause.
+
+Works with **Claude Code** (default), **OpenAI Codex CLI**, **Gemini CLI**, or any CLI agent you can run headless. The skill itself is in the open [Agent Skills](https://agentskills.io) `SKILL.md` format.
 
 [繁體中文](README.zh-TW.md)
 
 ## Why
 
-A single long Claude Code session slowly gets worse: the context fills with stale reasoning, earlier mistakes become "facts", and one usage-limit hit ends the whole run. Compaction delays this; it does not fix it.
+A single long agent session slowly gets worse: the context fills with stale reasoning, earlier mistakes become "facts", and one usage-limit hit ends the whole run. Compaction delays this; it does not fix it.
 
 The fix is structural: **make every session short and put the state outside the session.**
 
@@ -25,8 +27,8 @@ PLAN.md ──► runner ──► fresh session: do task T1, verify, commit, ti
 
 ## Requirements
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI (`claude` on PATH)
-- Node.js ≥ 18 (already present wherever Claude Code runs)
+- At least one agent CLI on PATH: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude`), [Codex CLI](https://github.com/openai/codex) (`codex`) or [Gemini CLI](https://github.com/google-gemini/gemini-cli) (`gemini`)
+- Node.js ≥ 18 (all three CLIs ship via npm, so it is already there)
 - git
 
 Works on macOS, Linux and Windows. No dependencies.
@@ -42,7 +44,22 @@ claude plugin install relay@claude-relay
 
 This gives you the `/relay` skill in every project.
 
-### Manual
+### Codex CLI
+
+Codex reads skills from `~/.codex/skills`. Clone the repo and copy or symlink `skills/relay` there:
+
+```
+git clone https://github.com/okshoptw/claude-relay
+ln -s "$PWD/claude-relay/skills/relay" ~/.codex/skills/relay     # Windows: mklink /D
+```
+
+Then in a project: `relay init --agent codex` (or set `"agent": "codex"` in `.relay/config.json`). Sessions run as `codex exec --full-auto`.
+
+### Gemini CLI or any other agent
+
+Use the CLI directly for planning and the runner for execution: `relay init --agent gemini` runs sessions as `gemini --yolo -p <prompt>`. For anything else set `"agent": "custom"` and `"command": ["my-agent", "--auto", "{prompt}"]` (omit `{prompt}` to pipe it on stdin). The runner only needs the agent to edit files, run commands and commit; success is judged by the tick mark and the new commit, not by the agent's output.
+
+### Manual (Claude Code)
 
 Clone the repo and copy or symlink `skills/relay` into `~/.claude/skills/relay`.
 
@@ -125,7 +142,7 @@ A task counts as done only if the tick mark changed **and** HEAD moved. A worker
 ## CLI
 
 ```
-relay init [--plan <path>] [--verify "<cmd>"]   create .relay/ in the current project
+relay init [--plan <path>] [--verify "<cmd>"] [--agent <name>]   create .relay/ in the current project
 relay status                                    progress, next task, runner state, handoff
 relay next                                      print the next open task
 relay run [--once] [--dry-run] [--detach]       run the loop (foreground by default)
@@ -139,10 +156,12 @@ relay stop                                      stop a background runner
 | `plan` | `.relay/PLAN.md` | task file |
 | `handoff` | `.relay/HANDOFF.md` | handoff note |
 | `verify` | `""` | command that must pass before a task is ticked |
-| `claude` | `claude` | CLI executable |
-| `model` | `""` | `--model` for sessions |
-| `permissionMode` | `acceptEdits` | `--permission-mode` for sessions |
-| `extraArgs` | `[]` | extra CLI args, e.g. `["--effort", "high"]` |
+| `agent` | `claude` | `claude` \| `codex` \| `gemini` \| `custom` |
+| `command` | `[]` | for `custom`: argv; `{prompt}` is substituted, otherwise the prompt is piped to stdin |
+| `claude` | `claude` | executable override for the chosen preset (e.g. a full path) |
+| `model` | `""` | model flag for sessions |
+| `permissionMode` | `acceptEdits` | Claude Code `--permission-mode` |
+| `extraArgs` | `[]` | extra CLI args passed to every session |
 | `sessionTimeoutMinutes` | `45` | hard kill per session |
 | `reviewEvery` | `3` | review after this many tasks (0 = never) |
 | `acceptance` | `true` | run the acceptance session at the end |
@@ -154,7 +173,7 @@ relay stop                                      stop a background runner
 
 ## Permissions and safety
 
-Sessions run headless with `--permission-mode acceptEdits`: file edits are auto-approved, Bash commands still follow your allow/deny rules. For fully unattended runs you may set `"permissionMode": "bypassPermissions"` — only inside a sandbox you trust. Workers are told never to push and never to rewrite history.
+Sessions run headless. Claude Code uses `--permission-mode acceptEdits` (edits auto-approved, Bash still follows your allow/deny rules; set `"permissionMode": "bypassPermissions"` only inside a sandbox you trust). Codex runs `exec --full-auto` and Gemini runs `--yolo`, which are their unattended modes. Workers are told never to push and never to rewrite history.
 
 Every session's prompt and result are written to `.relay/logs/`.
 
