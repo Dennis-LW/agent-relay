@@ -183,6 +183,18 @@ session 無人值守執行。Claude Code 用 `--permission-mode acceptEdits`（�
 - 背景 runner 是本機 process，睡眠或關機就停；再 `relay run` 就從計畫接續。要脫離本機，可用任何排程器定期執行 `relay run --once`。
 - 品質仍取決於任務拆得夠不夠小。大而模糊的任務會得到大而模糊的結果。
 
+## 相關專案
+
+agent-relay 承襲自 [Ralph Wiggum loop](https://paddo.dev/blog/ralph-wiggum-autonomous-loops/)：一個 `while` 迴圈，每個任務起一個全新 agent，進度放在檔案裡。社群實作可參考 [coleam00/ralph-loop-quickstart](https://github.com/coleam00/ralph-loop-quickstart)、[frankbria/ralph-claude-code](https://github.com/frankbria/ralph-claude-code)、[harrymunro/ralph-wiggum](https://github.com/harrymunro/ralph-wiggum)。（Anthropic 官方的 [ralph-wiggum plugin](https://github.com/anthropics/claude-code/tree/main/plugins/ralph-wiggum) 是同一個 session 一直跑，正是本專案要避免的做法。）
+
+agent-relay 多做的事：
+
+- 跨平台 Node runner 取代 bash，任何 CLI agent 皆可，不限 Claude Code；
+- 獨立乾淨 context 的 **review** 與 **acceptance** session，不只是 worker 迴圈；
+- 成功與否只看可觀察的副作用（勾選加 commit），不信 agent 自己的回報；
+- 限流退避內建在迴圈裡，不需要另外裝 [claude-auto-continue](https://github.com/Anonymousmirror/claude-auto-continue) 或 [resume-after-limit](https://github.com/carlaost/resume-after-limit) 這類工具；
+- `/relay plan` 讓 agent 自己寫出符合格式的計畫，不必手寫 PRD。
+
 ## 授權
 
 MIT

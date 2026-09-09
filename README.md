@@ -183,6 +183,18 @@ Every session's prompt and result are written to `.relay/logs/`.
 - The background runner is a local process. Sleep or shutdown stops it; `relay run` resumes from the plan. For a machine-independent loop, drive `relay run --once` from a scheduler of your choice.
 - Session quality still depends on task size. Big vague tasks give big vague results.
 
+## Related work
+
+agent-relay is a descendant of the [Ralph Wiggum loop](https://paddo.dev/blog/ralph-wiggum-autonomous-loops/): a `while` loop that starts a fresh agent for each task and keeps progress in a file. Good community implementations include [coleam00/ralph-loop-quickstart](https://github.com/coleam00/ralph-loop-quickstart), [frankbria/ralph-claude-code](https://github.com/frankbria/ralph-claude-code) and [harrymunro/ralph-wiggum](https://github.com/harrymunro/ralph-wiggum). (Anthropic's [ralph-wiggum plugin](https://github.com/anthropics/claude-code/tree/main/plugins/ralph-wiggum) keeps one session running instead, which is the thing this project avoids.)
+
+What agent-relay adds:
+
+- cross-platform Node runner instead of bash, and any CLI agent instead of Claude Code only;
+- separate clean-context **review** and **acceptance** sessions, not just a worker loop;
+- success judged by observable side effects (tick + commit), never by the agent's own report;
+- rate-limit backoff built into the loop, so helpers like [claude-auto-continue](https://github.com/Anonymousmirror/claude-auto-continue) or [resume-after-limit](https://github.com/carlaost/resume-after-limit) are not needed;
+- `/relay plan` lets the agent write the plan in the required format instead of hand-writing a PRD.
+
 ## License
 
 MIT
