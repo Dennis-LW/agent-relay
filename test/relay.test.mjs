@@ -58,26 +58,33 @@ test("happy path: workers, review gate inserts R task, acceptance ends the loop"
   const { dir, log } = freshRepo(PLAN);
   const r = relay(dir, ["run"]);
   assert.equal(r.code, 0, r.out);
-  // T3 and R1 are unreviewed when the task list empties, so a review runs before acceptance
-  assert.deepEqual(log(), ["acceptance: PASS", "R1: done", "review: 1 findings", "R1: done", "T3: done", "review: 1 findings", "T2: done", "T1: done", "plan", "init"]);
+  // T3 and R1 are unreviewed when the list empties: the acceptance session reviews them inline (no separate review session)
+  assert.deepEqual(log(), ["acceptance: PASS (0 follow-ups)", "R1: done", "T3: done", "review: 1 findings", "T2: done", "T1: done", "plan", "init"]);
+  assert.match(fs.readFileSync(path.join(dir, ".relay", "ACCEPTANCE.md"), "utf8"), /reviewed-inline: true/);
+  assert.equal(fs.existsSync(path.join(dir, ".relay", "reviews", "review-accept.md")), true);
   const plan = fs.readFileSync(path.join(dir, ".relay", "PLAN.md"), "utf8");
-  assert.equal((plan.match(/^- \[x\]/gm) || []).length, 5);
+  assert.equal((plan.match(/^- \[x\]/gm) || []).length, 4);
   const state = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "state.json"), "utf8"));
-  assert.equal(state.runs.length, 8);
+  assert.equal(state.runs.length, 6);
   assert.equal(state.runs[0].tokens.output, 300, "usage is recorded per run");
   assert.equal(state.runs[0].costUsd, 0.01);
   const status = relay(dir, ["status"]).out;
-  assert.match(status, /Usage:\s+8 sessions, \$0\.08/);
-  assert.match(status, /5 done \/ 0 open/);
+  assert.match(status, /Usage:\s+6 sessions, \$0\.06/);
+  assert.match(status, /4 done \/ 0 open/);
 });
 
-test("review range excludes the review commit and starts after it", () => {
-  const { dir, git } = freshRepo(PLAN);
+test("review range starts after the last clean-context session's own commit", () => {
+  const { dir } = freshRepo(PLAN);
+  const subjectAt = (sha) => execFileSync("git", ["log", "-1", "--format=%s", sha], { cwd: dir, encoding: "utf8" }).trim();
+  // two workers then the review gate: lastReviewHead must point at the review commit itself
+  relay(dir, ["run", "--once"]);
+  relay(dir, ["run", "--once"]);
+  relay(dir, ["run", "--once"]);
+  let state = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "state.json"), "utf8"));
+  assert.equal(subjectAt(state.lastReviewHead), "review: 1 findings");
   relay(dir, ["run"]);
-  const state = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "state.json"), "utf8"));
-  const subject = execFileSync("git", ["log", "-1", "--format=%s", state.lastReviewHead], { cwd: dir, encoding: "utf8" }).trim();
-  assert.equal(subject, "review: 1 findings");
-  void git;
+  state = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "state.json"), "utf8"));
+  assert.equal(subjectAt(state.lastReviewHead), "acceptance: PASS (0 follow-ups)", "acceptance also counts as a review point");
 });
 
 test("worker that neither ticks nor commits counts as a failure and the runner gives up", () => {
@@ -166,7 +173,7 @@ test("relay init --models validates roles and writes them; relay plan runs one s
   const ok = relay(dir, ["init", "--models", "plan=plan-m,worker=w-m"]);
   assert.equal(ok.code, 0, ok.out);
   const cfg = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "config.json"), "utf8"));
-  assert.deepEqual(cfg.models, { plan: "plan-m", worker: "w-m", review: "", accept: "" });
+  assert.deepEqual(cfg.models, { plan: "plan-m", worker: "w-m", review: "", accept: "", recheck: "" });
   assert.deepEqual(cfg.command, [process.execPath, FAKE], "init keeps existing config keys");
 
   const r = relay(dir, ["plan", "build", "a", "widget"]);
@@ -209,4 +216,30 @@ test("a CLI/model configuration error stops the runner at once instead of retryi
   assert.match(r.out, /claude_code_version_too_old/);
   const state = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "state.json"), "utf8"));
   assert.equal(state.runs.length, 1);
+});
+
+test("acceptance follow-ups are re-verified by a recheck session on the worker model, scoped to the new tasks", () => {
+  const { dir, log } = freshRepo(PLAN, { reviewEvery: 0, models: { worker: "w-m", accept: "a-m" }, command: [process.execPath, FAKE, "--model", "{model}"] });
+  const r = relay(dir, ["run"], { FAKE_ACCEPT_ADD: "1" });
+  assert.equal(r.code, 0, r.out);
+  assert.deepEqual(log().slice(0, 3), ["recheck: PASS (0 follow-ups)", "A1: done", "acceptance: PASS (1 follow-ups)"]);
+  const calls = fs.readFileSync(path.join(dir, ".relay", "fake-calls.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const rc = calls.find((c) => c.kind === "recheck");
+  assert.equal(rc.role, "recheck");
+  assert.deepEqual(rc.argv, ["--model", "w-m"], "recheck falls back to the worker model");
+  assert.equal(calls.find((c) => c.kind === "accept").argv[1], "a-m");
+  const acc = fs.readFileSync(path.join(dir, ".relay", "ACCEPTANCE.md"), "utf8");
+  assert.match(acc, /## Recheck\n- A1: follow-up from acceptance/);
+  assert.doesNotMatch(acc.split("## Recheck")[1], /T1:/, "recheck scope excludes tasks accepted in round 1");
+  assert.match(acc, /reviewed-inline: false/, "reviewEvery=0 means no inline review either");
+  assert.match(r.out, /recheck round 2\/2/);
+});
+
+test("CONTEXT.md written by the plan session is injected into worker prompts", () => {
+  const { dir } = freshRepo(PLAN);
+  relay(dir, ["init", "--models", "plan=p"]);
+  relay(dir, ["plan", "anything"]);
+  assert.equal(fs.readFileSync(path.join(dir, ".relay", "CONTEXT.md"), "utf8").includes("fake project brief"), true);
+  const dry = relay(dir, ["run", "--dry-run"]).out;
+  assert.match(dry, /## Project context\n\n# Context\n\nfake project brief/);
 });

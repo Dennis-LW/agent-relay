@@ -34,6 +34,7 @@ if (mode === "ratelimit") return out({ result: "Claude AI usage limit reached|17
 if (kind === "plan") {
   const m = promptText.match(/## Request\n\n(.+)/);
   fs.writeFileSync(plan, `# Plan: ${m ? m[1] : "?"}\n\n## Goal\nx\n\n## Verify\n\`true\`\n\n## Tasks\n- [ ] T1: one\n  - Accept: a\n- [ ] T2: two\n  - Accept: b\n`);
+  fs.writeFileSync(".relay/CONTEXT.md", "# Context\n\nfake project brief\n");
 } else if (kind.startsWith("worker-")) {
   const id = kind.slice("worker-".length);
   fs.writeFileSync(`out-${id}.txt`, `work for ${id}\n`);
@@ -48,8 +49,24 @@ if (kind === "plan") {
   fs.appendFileSync(plan, "- [ ] R1: fix something found in review\n  - Accept: out-R1.txt exists\n");
   sh(`git add -A && git commit -qm "review: 1 findings"`);
 } else if (kind === "accept") {
-  fs.writeFileSync(".relay/ACCEPTANCE.md", "PASS\n");
-  sh(`git add -A && git commit -qm "acceptance: PASS"`);
+  const reviewed = /have NOT been reviewed yet/.test(promptText);
+  if (reviewed) {
+    fs.mkdirSync(".relay/reviews", { recursive: true });
+    fs.writeFileSync(".relay/reviews/review-accept.md", "reviewed inside acceptance\n");
+  }
+  fs.writeFileSync(".relay/ACCEPTANCE.md", `PASS (reviewed-inline: ${reviewed})\n`);
+  let n = 0;
+  if (process.env.FAKE_ACCEPT_ADD) {
+    fs.appendFileSync(plan, "- [ ] A1: follow-up from acceptance\n  - Accept: out-A1.txt exists\n");
+    n = 1;
+  }
+  sh(`git add -A && git commit -qm "acceptance: PASS (${n} follow-ups)"`);
+} else if (kind === "recheck") {
+  const m = promptText.match(/Follow-up tasks to re-verify:\n\n([\s\S]*?)\n\n## Project context/);
+  fs.appendFileSync(".relay/ACCEPTANCE.md", `## Recheck\n${m ? m[1] : "(no followups block)"}\n`);
+  sh(`git add -A && git commit -qm "recheck: PASS (0 follow-ups)"`);
+} else if (kind === "plan") {
+  // handled above
 }
 out(okJson);
 }

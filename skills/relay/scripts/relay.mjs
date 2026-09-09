@@ -18,6 +18,7 @@ const IS_WIN = process.platform === "win32";
 const DEFAULT_CONFIG = {
   plan: ".relay/PLAN.md",
   handoff: ".relay/HANDOFF.md",
+  context: ".relay/CONTEXT.md", // one-page project brief written by the plan session, injected into every prompt
   verify: "",
   agent: "claude", // claude | codex | gemini | custom
   command: [], // custom agent: argv, "{prompt}" is replaced by the prompt (or omit it to feed stdin)
@@ -26,12 +27,14 @@ const DEFAULT_CONFIG = {
   // Per-role overrides so planning, implementation and review can use different
   // models (e.g. a stronger model for plan/review, a cheaper one for workers).
   // Empty string = fall back to `model`, then to the CLI default.
-  models: { plan: "", worker: "", review: "", accept: "" },
+  // `recheck` is the cheap re-verification of follow-up tasks after the first
+  // acceptance; it falls back to the worker model, not the accept model.
+  models: { plan: "", worker: "", review: "", accept: "", recheck: "" },
   // Reasoning effort, same fallback rules as models. Claude Code: --effort
   // (low|medium|high); Codex: -c model_reasoning_effort=<level>; custom: {effort};
   // Gemini has no equivalent and ignores it.
   effort: "",
-  efforts: { plan: "", worker: "", review: "", accept: "" },
+  efforts: { plan: "", worker: "", review: "", accept: "", recheck: "" },
   permissionMode: "acceptEdits", // claude only
   // claude only: extra --allowedTools rules. Headless `-p` sessions cannot ask for
   // permission, so git and the verify command are always allowed (see claudeAllowedTools).
@@ -113,6 +116,7 @@ function loadProject(cwd) {
     cfg,
     planPath: path.resolve(root, cfg.plan),
     handoffPath: path.resolve(root, cfg.handoff),
+    contextPath: path.resolve(root, cfg.context),
     statePath: path.join(relayDir, "state.json"),
     pidPath: path.join(relayDir, "runner.pid"),
     logsDir: path.join(relayDir, "logs"),
@@ -125,7 +129,7 @@ function loadState(p) {
     consecutiveFailures: 0,
     acceptanceRounds: 0,
     lastReviewHead: "",
-    reviewedBeforeAccept: false,
+    acceptedTaskCount: 0,
     runs: [],
     stopped: false,
   });
@@ -225,6 +229,8 @@ function baseVars(proj, plan) {
     PLAN_PATH: rel(proj.planPath),
     HANDOFF_PATH: rel(proj.handoffPath),
     HANDOFF: exists(proj.handoffPath) ? readText(proj.handoffPath) : "(no handoff yet — this is the first session)",
+    CONTEXT: exists(proj.contextPath) ? readText(proj.contextPath).trim() : "(no project brief; explore as needed)",
+    CONTEXT_PATH: rel(proj.contextPath),
     VERIFY: cfg.verify || plan.verify || "(no verify command configured — use the project's own test/build command)",
     NOTES: cfg.notes || "",
     PLATFORM: process.platform,
@@ -242,13 +248,19 @@ const FATAL_RE = /claude_code_version_too_old|does not support this model|not_fo
 
 const RATE_LIMIT_RE = /usage limit reached|rate_limit_error|rate.?limit(?:ed)?\s+(?:reached|exceeded|hit)|too many requests|\b429\b|overloaded_error/i;
 
-const ROLES = ["plan", "worker", "review", "accept"];
+const ROLES = ["plan", "worker", "review", "accept", "recheck"];
 const roleOf = (kind) => (kind.startsWith("worker-") ? "worker" : kind);
 function modelFor(cfg, role) {
-  return (cfg.models && cfg.models[role]) || cfg.model || "";
+  const own = cfg.models && cfg.models[role];
+  if (own) return own;
+  if (role === "recheck") return modelFor(cfg, "worker");
+  return cfg.model || "";
 }
 function effortFor(cfg, role) {
-  return (cfg.efforts && cfg.efforts[role]) || cfg.effort || "";
+  const own = cfg.efforts && cfg.efforts[role];
+  if (own) return own;
+  if (role === "recheck") return effortFor(cfg, "worker");
+  return cfg.effort || "";
 }
 
 function runClaude(proj, prompt, kind, verify = "") {
@@ -465,17 +477,32 @@ async function workerSession(proj, plan, task) {
   return runClaude(proj, render(loadPrompt("worker"), vars), `worker-${task.id}`, vars.VERIFY);
 }
 
-async function reviewSession(proj, plan, state) {
+function unreviewedRange(proj, state) {
   const head = gitHead(proj.root);
   const since = state.lastReviewHead || "";
   // Without a recorded review head, count real commits since the runner started
   // (a worker may make more than one commit per task, so task count is not enough).
   const fallback = state.runStartHead && state.runStartHead !== head ? state.runStartHead : `HEAD~${Math.max(1, state.completedSinceReview)}`;
-  const range = since ? `${since}..${head}` : `${fallback}..HEAD`;
-  const vars = { ...baseVars(proj, plan), COMMIT_RANGE: range };
+  return since ? `${since}..${head}` : `${fallback}..HEAD`;
+}
+
+async function reviewSession(proj, plan, state) {
+  const head = gitHead(proj.root);
+  const vars = { ...baseVars(proj, plan), COMMIT_RANGE: unreviewedRange(proj, state) };
   const res = await runClaude(proj, render(loadPrompt("review"), vars), "review", vars.VERIFY);
   // The review session commits its own report; the next review must start after it.
   return { res, head: res.isError ? head : gitHead(proj.root) };
+}
+
+// Existing review reports, for the acceptance session (so it does not redo them).
+function reviewsSummary(proj) {
+  const dir = path.join(proj.relayDir, "reviews");
+  if (!exists(dir)) return "(no review reports yet)";
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".md")).sort();
+  if (!files.length) return "(no review reports yet)";
+  const last = readText(path.join(dir, files[files.length - 1]));
+  const clipped = last.length > 6000 ? last.slice(0, 6000) + "\n…(truncated)" : last;
+  return `${files.map((f) => `.relay/reviews/${f}`).join(", ")}\n\nLatest report:\n\n${clipped}`;
 }
 
 async function planSession(proj, description) {
@@ -483,6 +510,7 @@ async function planSession(proj, description) {
   const rel = (p) => path.relative(proj.root, p).split(path.sep).join("/");
   const vars = {
     PLAN_PATH: rel(proj.planPath),
+    CONTEXT_PATH: rel(proj.contextPath),
     DESCRIPTION: description,
     VERIFY: cfg.verify || "(not configured yet — find the project's test/build command and put it in the Verify section and in .relay/config.json)",
     NOTES: cfg.notes || "",
@@ -492,9 +520,33 @@ async function planSession(proj, description) {
   return runClaude(proj, render(loadPrompt("plan"), vars), "plan");
 }
 
-async function acceptanceSession(proj, plan) {
-  const vars = baseVars(proj, plan);
+// First acceptance round. When commits exist that no review session has seen,
+// the same session reviews them first (one clean-context session instead of two).
+async function acceptanceSession(proj, plan, state) {
+  const unreviewed = state.completedSinceReview > 0 && proj.cfg.reviewEvery > 0;
+  const vars = {
+    ...baseVars(proj, plan),
+    REVIEWS: reviewsSummary(proj),
+    UNREVIEWED: unreviewed
+      ? `Commits \`${unreviewedRange(proj, state)}\` have NOT been reviewed yet. Before the acceptance walk-through, review them as a skeptical senior engineer (run \`git diff ${unreviewedRange(proj, state)}\`): correctness bugs, contract breaks between tasks, verification gaps, drift from Constraints. Write the findings to \`.relay/reviews/review-<date>.md\` (severity, file:line, what is wrong, how to fix) and fold every high/medium finding into the follow-up tasks below as \`R<n>\` items (low findings go in the report only).`
+      : "All commits have been reviewed by review sessions (see the reports above); do not redo the review, only verify.",
+  };
   return runClaude(proj, render(loadPrompt("accept"), vars), "accept", vars.VERIFY);
+}
+
+// Later rounds: only the follow-up tasks added since the last acceptance are
+// re-verified (plus a review of their diff). Runs on the cheaper recheck role.
+async function recheckSession(proj, plan, state) {
+  const newTasks = plan.tasks.filter((t) => t.index >= (state.acceptedTaskCount || 0));
+  const vars = {
+    ...baseVars(proj, plan),
+    COMMIT_RANGE: unreviewedRange(proj, state),
+    FOLLOWUPS: newTasks.length
+      ? newTasks.map((t) => `- ${t.id}: ${t.title}\n${t.body.map((l) => `  ${l}`).join("\n")}`).join("\n")
+      : "(none listed — re-verify the whole plan)",
+    ROUND: String((state.acceptanceRounds || 0) + 1),
+  };
+  return runClaude(proj, render(loadPrompt("recheck"), vars), "recheck", vars.VERIFY);
 }
 
 // ---------------------------------------------------------------------------
@@ -715,13 +767,9 @@ async function cmdRun(proj, flags) {
     const plan = parsePlan(proj.planPath);
     const task = nextOpenTask(plan);
 
-    // Review gate. Also review before acceptance when unreviewed work exists, so
-    // acceptance judges reviewed code rather than the other way round.
-    // The pre-acceptance review happens at most once per acceptance round, otherwise
-    // review → fix task → review could loop forever on a picky reviewer.
-    const acceptancePending = !task && cfg.acceptance && st.acceptanceRounds < cfg.maxAcceptanceRounds;
-    const preAcceptReview = acceptancePending && st.completedSinceReview > 0 && !st.reviewedBeforeAccept;
-    if (cfg.reviewEvery > 0 && ((task && st.completedSinceReview >= cfg.reviewEvery) || preAcceptReview)) {
+    // Review gate (between tasks). Work left unreviewed when the list empties is
+    // reviewed inside the acceptance / recheck session instead of a separate one.
+    if (task && cfg.reviewEvery > 0 && st.completedSinceReview >= cfg.reviewEvery) {
       log(`review gate: ${st.completedSinceReview} tasks since last review`);
       if (dry) {
         log("(dry-run) would run review session");
@@ -734,7 +782,6 @@ async function cmdRun(proj, flags) {
       if (!res.isError) {
         st.completedSinceReview = 0;
         st.lastReviewHead = head;
-        if (preAcceptReview) st.reviewedBeforeAccept = true;
       }
       writeJson(proj.statePath, st);
       if (res.isError) {
@@ -754,15 +801,25 @@ async function cmdRun(proj, flags) {
         log("all tasks closed; done.");
         break;
       }
-      log(`acceptance round ${st.acceptanceRounds + 1}/${cfg.maxAcceptanceRounds}`);
+      const recheck = st.acceptanceRounds > 0;
+      log(
+        recheck
+          ? `recheck round ${st.acceptanceRounds + 1}/${cfg.maxAcceptanceRounds}: re-verifying follow-up tasks`
+          : `acceptance round 1/${cfg.maxAcceptanceRounds}${st.completedSinceReview > 0 && cfg.reviewEvery > 0 ? ` (reviewing ${st.completedSinceReview} unreviewed tasks first)` : ""}`,
+      );
       if (dry) {
-        log("(dry-run) would run acceptance session");
+        log(`(dry-run) would run ${recheck ? "recheck" : "acceptance"} session`);
         break;
       }
-      const res = await acceptanceSession(proj, plan);
+      const res = recheck ? await recheckSession(proj, plan, st) : await acceptanceSession(proj, plan, st);
       st.acceptanceRounds++;
-      st.reviewedBeforeAccept = false;
-      record(st, "accept", res.isError ? "error" : "ok", res);
+      record(st, recheck ? "recheck" : "accept", res.isError ? "error" : "ok", res);
+      if (!res.isError) {
+        // Everything up to here has now been looked at with a clean context.
+        st.completedSinceReview = 0;
+        st.lastReviewHead = gitHead(proj.root);
+        st.acceptedTaskCount = plan.tasks.length;
+      }
       writeJson(proj.statePath, st);
       if (res.isError && res.fatal) {
         log(`acceptance failed with a configuration error: ${res.resultText.trim().split("\n")[0].slice(0, 300)}`);
@@ -771,10 +828,10 @@ async function cmdRun(proj, flags) {
       if (res.isError && (await handleFailure(proj, st, res))) break;
       const after = parsePlan(proj.planPath);
       if (!nextOpenTask(after)) {
-        log("acceptance passed with no new tasks; done.");
+        log(`${recheck ? "recheck" : "acceptance"} passed with no new tasks; done.`);
         break;
       }
-      log("acceptance added follow-up tasks; continuing");
+      log(`${recheck ? "recheck" : "acceptance"} added ${after.tasks.length - plan.tasks.length} follow-up task(s); continuing`);
       if (once) break;
       continue;
     }
@@ -890,6 +947,7 @@ Files (per project):
   .relay/config.json   settings (plan path, verify command, timeouts, review cadence...)
   .relay/PLAN.md       task list — "- [ ] T1: ..." items under a "## Tasks" heading
   .relay/HANDOFF.md    note left by the last session for the next one
+  .relay/CONTEXT.md    one-page project brief written by the plan session, given to every session
   .relay/logs/         prompt + result of every session
 `;
 

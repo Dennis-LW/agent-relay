@@ -5,6 +5,10 @@ You are the REVIEW session in a relay. Worker sessions implemented several tasks
 Commits to review: `{{COMMIT_RANGE}}` (run `git log --oneline {{COMMIT_RANGE}}` and `git diff {{COMMIT_RANGE}}`).
 Plan: `{{PLAN_PATH}}` — read the goal and constraints so you review against intent, not just style.
 
+## Project context
+
+{{CONTEXT}}
+
 ## What to look for
 
 - Correctness bugs, missing edge cases, broken contracts between tasks (task A assumed X, task B did Y).

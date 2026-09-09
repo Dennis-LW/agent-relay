@@ -20,8 +20,9 @@ You are the PLANNING session of a relay. Later, a runner will start one fresh ag
    - **Constraints** capture what a fresh session cannot know: branch, style rules, files not to touch, conventions.
    - **Verify** is one command that must pass after every task. Current setting: `{{VERIFY}}`. If the project has none, make T1 create one.
    - Use ids `T1, T2, ...` only. Do not use `R<n>` or `A<n>`.
-3. Do NOT implement anything, do not commit, do not modify other files. Your only output is the plan file.
-4. Finish with a short summary: number of tasks, the verify command, and anything the user should decide before running.
+3. Write `{{CONTEXT_PATH}}` (overwrite): a one-page project brief that every later session receives verbatim, so they do not have to re-explore. Include: directory layout (what lives where), language/runtime and package manager, how to run tests/build/lint, conventions and style rules, key files and modules a worker will touch, anything surprising. Facts only, no plan content. Keep it under ~60 lines.
+4. Do NOT implement anything, do not commit, do not modify other files. Your outputs are the plan file and the context file.
+5. Finish with a short summary: number of tasks, the verify command, and anything the user should decide before running.
 
 Platform: {{PLATFORM}}.
 {{NOTES}}
