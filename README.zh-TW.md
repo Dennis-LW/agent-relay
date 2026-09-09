@@ -144,6 +144,7 @@ node ~/.claude/skills/relay/scripts/relay.mjs status   # 若用 npm 安裝，直
 ```
 relay init [--plan <path>] [--verify "<cmd>"] [--agent <name>]
            [--model <name>] [--models plan=a,worker=b,review=c,accept=d]
+           [--effort <level>] [--efforts plan=a,worker=b,review=c,accept=d]
                                                 在目前專案建立 .relay/
 relay plan "<描述或需求文件路徑>"                用 plan 角色的模型跑一個無頭 session 寫出計畫
 relay status                                    進度、下一個任務、runner 狀態、交接內容
@@ -164,6 +165,7 @@ relay stop                                      停止背景 runner
 | `claude` | `claude` | 所選 preset 的執行檔覆寫（例如完整路徑） |
 | `model` | `""` | session 的模型參數 |
 | `models` | `{plan,worker,review,accept: ""}` | 各角色的模型覆寫；空字串退回 `model`，再退回 CLI 預設。見「各角色的模型」 |
+| `effort` / `efforts` | `""` / 各角色 `""` | 推理 effort，退回規則同 `model`/`models`。Claude Code 用 `--effort`（`low`、`medium`、`high`）；Codex 用 `-c model_reasoning_effort=<level>`；custom 用 `{effort}`；Gemini 沒有對應選項 |
 | `permissionMode` | `acceptEdits` | Claude Code 的 `--permission-mode` |
 | `allowedTools` | `[]` | Claude Code：額外的 `--allowedTools` 規則。`git add/commit/status/diff/log`、`mkdir` 與 verify 指令永遠放行，因為無人值守的 session 沒辦法問你 |
 | `extraArgs` | `[]` | 附加到每個 session 的額外 CLI 參數 |
@@ -202,7 +204,9 @@ CLI 同義寫法：`relay init --models plan=claude-opus-5,worker=claude-sonnet-
 | review | runner，每完成 `reviewEvery` 項 | `models.review` |
 | accept | runner，所有任務打勾後 | `models.accept` |
 
-`relay status` 會顯示目前生效的模型，以及每筆 session 實際跑在哪個模型上。
+effort 也是同一套：`effort` 全部角色共用，`efforts` 各角色分開，例如 `relay init --efforts plan=high,worker=medium,review=high`。Claude Code 會變成 `--effort`（`low`、`medium`、`high`），Codex 是 `-c model_reasoning_effort=<level>`，custom 命令用 `{effort}`，Gemini 會忽略。把 worker 的 effort 調低是僅次於換模型的省額度手段：worker 大部分時間在讀檔和呼叫工具，多想通常不會改變 diff。
+
+`relay status` 會顯示目前生效的模型與 effort，以及每筆 session 實際跑的設定。
 
 ## 權限與安全
 

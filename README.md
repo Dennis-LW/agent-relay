@@ -144,6 +144,7 @@ A task counts as done only if the tick mark changed **and** HEAD moved. A worker
 ```
 relay init [--plan <path>] [--verify "<cmd>"] [--agent <name>]
            [--model <name>] [--models plan=a,worker=b,review=c,accept=d]
+           [--effort <level>] [--efforts plan=a,worker=b,review=c,accept=d]
                                                 create .relay/ in the current project
 relay plan "<description or spec path>"         write the plan with one headless session on the plan model
 relay status                                    progress, next task, runner state, handoff
@@ -164,6 +165,7 @@ relay stop                                      stop a background runner
 | `claude` | `claude` | executable override for the chosen preset (e.g. a full path) |
 | `model` | `""` | model flag for sessions |
 | `models` | `{plan,worker,review,accept: ""}` | per-role model override; empty falls back to `model`, then the CLI default. See "Models per role" |
+| `effort` / `efforts` | `""` / per role `""` | reasoning effort, same fallback as `model`/`models`. Claude Code `--effort` (`low`, `medium`, `high`); Codex `-c model_reasoning_effort=<level>`; custom `{effort}`; Gemini has no equivalent |
 | `permissionMode` | `acceptEdits` | Claude Code `--permission-mode` |
 | `allowedTools` | `[]` | Claude Code: extra `--allowedTools` rules. `git add/commit/status/diff/log`, `mkdir` and the verify command are always allowed, because headless sessions cannot ask |
 | `extraArgs` | `[]` | extra CLI args passed to every session |
@@ -202,7 +204,9 @@ Where each role's model is used:
 | review | runner, every `reviewEvery` tasks | `models.review` |
 | accept | runner, when all tasks are ticked | `models.accept` |
 
-`relay status` shows the models in effect and the model each recorded session actually ran on.
+Effort works the same way: `effort` for all roles, `efforts` per role, e.g. `relay init --efforts plan=high,worker=medium,review=high`. On Claude Code this becomes `--effort` (`low`, `medium`, `high`); on Codex `-c model_reasoning_effort=<level>`; in a custom command `{effort}`. Gemini ignores it. Lower worker effort is the second cheapest lever after model choice: workers do a lot of reading and tool calls where extra thinking rarely changes the diff.
+
+`relay status` shows the models and efforts in effect and what each recorded session actually ran on.
 
 ## Permissions and safety
 

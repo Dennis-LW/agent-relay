@@ -27,6 +27,11 @@ const DEFAULT_CONFIG = {
   // models (e.g. a stronger model for plan/review, a cheaper one for workers).
   // Empty string = fall back to `model`, then to the CLI default.
   models: { plan: "", worker: "", review: "", accept: "" },
+  // Reasoning effort, same fallback rules as models. Claude Code: --effort
+  // (low|medium|high); Codex: -c model_reasoning_effort=<level>; custom: {effort};
+  // Gemini has no equivalent and ignores it.
+  effort: "",
+  efforts: { plan: "", worker: "", review: "", accept: "" },
   permissionMode: "acceptEdits", // claude only
   // claude only: extra --allowedTools rules. Headless `-p` sessions cannot ask for
   // permission, so git and the verify command are always allowed (see claudeAllowedTools).
@@ -238,23 +243,27 @@ const roleOf = (kind) => (kind.startsWith("worker-") ? "worker" : kind);
 function modelFor(cfg, role) {
   return (cfg.models && cfg.models[role]) || cfg.model || "";
 }
+function effortFor(cfg, role) {
+  return (cfg.efforts && cfg.efforts[role]) || cfg.effort || "";
+}
 
 function runClaude(proj, prompt, kind, verify = "") {
   const { cfg, root, logsDir } = proj;
   const model = modelFor(cfg, roleOf(kind));
+  const effort = effortFor(cfg, roleOf(kind));
   ensureDir(logsDir);
   const stamp = fileTs();
   const logBase = path.join(logsDir, `${stamp}-${kind}`);
   fs.writeFileSync(`${logBase}.prompt.md`, prompt);
 
-  const { exe, args, viaStdin } = agentCommand(cfg, prompt, verify, model);
+  const { exe, args, viaStdin } = agentCommand(cfg, prompt, verify, model, effort);
 
   return new Promise((resolve) => {
     const child = spawn(exe, args, {
       cwd: root,
       shell: IS_WIN, // resolves .cmd shims on Windows
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...childEnv(), CLAUDE_RELAY: "1", CLAUDE_RELAY_KIND: kind, RELAY_KIND: kind, RELAY_ROLE: roleOf(kind), RELAY_MODEL: model },
+      env: { ...childEnv(), CLAUDE_RELAY: "1", CLAUDE_RELAY_KIND: kind, RELAY_KIND: kind, RELAY_ROLE: roleOf(kind), RELAY_MODEL: model, RELAY_EFFORT: effort },
     });
     let stdout = "";
     let stderr = "";
@@ -286,17 +295,17 @@ function runClaude(proj, prompt, kind, verify = "") {
       const usage = summariseUsage(parsed);
       fs.writeFileSync(
         `${logBase}.result.md`,
-        `# ${kind} — ${stamp}\n\nmodel: ${model || "(cli default)"}  exit: ${code}  timedOut: ${timedOut}  rateLimited: ${rateLimited}\n` +
+        `# ${kind} — ${stamp}\n\nmodel: ${model || "(cli default)"}  effort: ${effort || "(cli default)"}  exit: ${code}  timedOut: ${timedOut}  rateLimited: ${rateLimited}\n` +
           `usage: ${usage ? JSON.stringify(usage) : "(not reported)"}\n` +
           (denials.length ? `permission denials: ${denials.join(", ")}\n` : "") +
           `\n## stdout\n\n${resultText}\n\n## stderr\n\n${stderr}\n`,
       );
-      resolve({ code, timedOut, isError, rateLimited, resultText, stderr, costUsd: parsed?.total_cost_usd, usage, denials, logBase, model });
+      resolve({ code, timedOut, isError, rateLimited, resultText, stderr, costUsd: parsed?.total_cost_usd, usage, denials, logBase, model, effort });
     });
     child.on("error", (e) => {
       clearTimeout(timer);
       fs.writeFileSync(`${logBase}.result.md`, `# ${kind} — spawn error\n\n${e.stack || e}\n`);
-      resolve({ code: -1, timedOut: false, isError: true, rateLimited: false, resultText: "", stderr: String(e), usage: null, denials: [], logBase, model });
+      resolve({ code: -1, timedOut: false, isError: true, rateLimited: false, resultText: "", stderr: String(e), usage: null, denials: [], logBase, model, effort });
     });
   });
 }
@@ -304,9 +313,11 @@ function runClaude(proj, prompt, kind, verify = "") {
 // Build the argv for the configured agent CLI. Success is judged by side
 // effects (tick + commit), so any CLI that can edit files and run commands
 // unattended works here.
-function agentCommand(cfg, prompt, verify = "", modelName = "") {
+function agentCommand(cfg, prompt, verify = "", modelName = "", effort = "") {
   const extra = cfg.extraArgs || [];
   const model = modelName ? ["--model", modelName] : [];
+  const claudeEffort = effort ? ["--effort", effort] : [];
+  const codexEffort = effort ? ["-c", `model_reasoning_effort=${effort}`] : [];
   switch (cfg.agent) {
     case "claude": {
       const allowed = claudeAllowedTools(cfg, verify);
@@ -320,6 +331,7 @@ function agentCommand(cfg, prompt, verify = "", modelName = "") {
           cfg.permissionMode,
           ...(allowed.length ? ["--allowedTools", allowed.join(" ")] : []),
           ...model,
+          ...claudeEffort,
           ...extra,
         ],
         viaStdin: true,
@@ -329,7 +341,7 @@ function agentCommand(cfg, prompt, verify = "", modelName = "") {
       // OpenAI Codex CLI: `codex exec` runs non-interactively; "-" reads the prompt from stdin.
       return {
         exe: cfg.claude === "claude" ? "codex" : cfg.claude,
-        args: ["exec", "--full-auto", ...model, ...extra, "-"],
+        args: ["exec", "--full-auto", ...model, ...codexEffort, ...extra, "-"],
         viaStdin: true,
       };
     case "gemini":
@@ -342,18 +354,21 @@ function agentCommand(cfg, prompt, verify = "", modelName = "") {
     case "custom": {
       if (!cfg.command?.length) throw new Error('agent "custom" needs "command": [exe, ...args] in .relay/config.json');
       const hasPlaceholder = cfg.command.some((a) => a.includes("{prompt}"));
-      // {model} is substituted with the role's model. When no model is configured,
-      // an argument that is exactly "{model}" is dropped together with the flag
-      // right before it (so ["--model", "{model}"] disappears cleanly).
+      // {model} / {effort} are substituted with the role's values. When a value is
+      // not configured, an argument that is exactly the placeholder is dropped
+      // together with the flag right before it (["--model", "{model}"] disappears).
+      const subs = { "{model}": modelName, "{effort}": effort };
       const src = cfg.command.slice(1);
       const args = [];
       for (let i = 0; i < src.length; i++) {
         const a = src[i];
-        if (a === "{model}" && !modelName) {
+        if (a in subs && !subs[a]) {
           if (args.length && args[args.length - 1].startsWith("-")) args.pop();
           continue;
         }
-        args.push(a.replace("{prompt}", prompt).replace("{model}", modelName));
+        let out = a.replace("{prompt}", prompt);
+        for (const [k, v] of Object.entries(subs)) out = out.split(k).join(v);
+        args.push(out);
       }
       return { exe: cfg.command[0], args, viaStdin: !hasPlaceholder };
     }
@@ -492,16 +507,18 @@ function cmdInit(cwd, flags) {
   if (flags.verify) merged.verify = flags.verify;
   if (flags.agent) merged.agent = flags.agent;
   if (flags.model) merged.model = flags.model;
-  if (flags.models) {
-    // --models plan=x,worker=y,review=z,accept=w
-    merged.models = { ...DEFAULT_CONFIG.models, ...(cfg.models || {}) };
-    for (const pair of String(flags.models).split(",")) {
+  if (flags.effort) merged.effort = flags.effort;
+  // --models plan=x,worker=y,...  /  --efforts plan=high,worker=medium,...
+  for (const key of ["models", "efforts"]) {
+    if (!flags[key]) continue;
+    merged[key] = { ...DEFAULT_CONFIG[key], ...(cfg[key] || {}) };
+    for (const pair of String(flags[key]).split(",")) {
       const [k, v] = pair.split("=").map((x) => x.trim());
       if (!ROLES.includes(k)) {
-        console.error(`--models: unknown role "${k}" (plan | worker | review | accept)`);
+        console.error(`--${key}: unknown role "${k}" (plan | worker | review | accept)`);
         process.exit(1);
       }
-      merged.models[k] = v || "";
+      merged[key][k] = v || "";
     }
   }
   writeJson(cfgPath, merged);
@@ -528,7 +545,10 @@ function cmdInit(cwd, flags) {
 }
 
 function describeModels(cfg) {
-  return ROLES.map((r) => `${r}=${modelFor(cfg, r) || "(cli default)"}`).join("  ");
+  return ROLES.map((r) => {
+    const e = effortFor(cfg, r);
+    return `${r}=${modelFor(cfg, r) || "(cli default)"}${e ? `/${e}` : ""}`;
+  }).join("  ");
 }
 
 // `relay plan "<description>"`: one headless session, on the plan role's model,
@@ -575,7 +595,7 @@ function cmdStatus(proj) {
     }
     console.log("Recent runs:");
     for (const r of state.runs.slice(-5)) {
-      const cost = (r.costUsd != null ? `  $${r.costUsd.toFixed(2)}` : "") + (r.model ? `  [${r.model}]` : "");
+      const cost = (r.costUsd != null ? `  $${r.costUsd.toFixed(2)}` : "") + (r.model || r.effort ? `  [${r.model || "default"}${r.effort ? "/" + r.effort : ""}]` : "");
       const tok = r.tokens ? `  out ${fmtK(r.tokens.output)}${r.turns != null ? ` / ${r.turns} turns` : ""}` : "";
       console.log(`  ${r.at}  ${r.kind.padEnd(14)} ${r.outcome}${cost}${tok}${r.note ? "  " + r.note : ""}`);
     }
@@ -792,6 +812,7 @@ function record(state, kind, outcome, res, note) {
     note: note || "",
     log: res?.logBase ? path.basename(res.logBase) : "",
     model: res?.model || "",
+    effort: res?.effort || "",
     costUsd: u?.costUsd ?? res?.costUsd ?? null,
     tokens: u ? { input: u.input, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, output: u.output } : null,
     turns: u?.turns ?? null,
@@ -825,6 +846,7 @@ const HELP = `agent-relay — run long tasks as a relay of short, fresh agent se
 Usage:
   relay init [--plan <path>] [--verify "<cmd>"] [--agent claude|codex|gemini|custom]
              [--model <name>] [--models plan=a,worker=b,review=c,accept=d]
+             [--effort <level>] [--efforts plan=a,worker=b,review=c,accept=d]
                                                   create .relay/ in the current project
   relay plan "<description or path to a spec>"    write the plan with one headless session (plan role's model)
   relay status                                    progress, next task, runner state, handoff

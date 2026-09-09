@@ -16,7 +16,7 @@ const promptText = fs.readFileSync(0, "utf8");
 const plan = ".relay/PLAN.md";
 // Record how we were invoked so tests can assert per-role models.
 fs.mkdirSync(".relay", { recursive: true });
-fs.appendFileSync(".relay/fake-calls.log", JSON.stringify({ kind, role: process.env.RELAY_ROLE, model: process.env.RELAY_MODEL, argv: process.argv.slice(2) }) + "\n");
+fs.appendFileSync(".relay/fake-calls.log", JSON.stringify({ kind, role: process.env.RELAY_ROLE, model: process.env.RELAY_MODEL, effort: process.env.RELAY_EFFORT, argv: process.argv.slice(2) }) + "\n");
 const sh = (c) => execSync(c, { stdio: "pipe" });
 const out = (o) => console.log(JSON.stringify(o));
 const usage = { input_tokens: 10, cache_read_input_tokens: 2000, cache_creation_input_tokens: 500, output_tokens: 300 };

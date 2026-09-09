@@ -41,7 +41,7 @@ You produce the plan; the runner does not. Steps:
 
 ### Models per role
 
-`models` in the config gives each role (`plan`, `worker`, `review`, `accept`) its own model; empty falls back to `model`, then to the CLI default. Names go straight to the agent CLI, so use names it accepts. Typical: a strong model for plan/review/accept and a cheaper one for workers (e.g. Claude Pro: Opus for plan and review, Sonnet for workers). If the user says which models they want for planning vs execution, write them with `node RELAY init --models ...` and tell them `relay status` shows what is in effect.
+`models` in the config gives each role (`plan`, `worker`, `review`, `accept`) its own model; empty falls back to `model`, then to the CLI default. Names go straight to the agent CLI, so use names it accepts. Typical: a strong model for plan/review/accept and a cheaper one for workers (e.g. Claude Pro: Opus for plan and review, Sonnet for workers). Effort follows the same pattern with `effort` / `efforts` (`--efforts plan=high,worker=medium`; Claude Code accepts `low`, `medium`, `high`; Codex maps to `model_reasoning_effort`; Gemini ignores it). If the user says which models or effort they want for planning vs execution, write them with `node RELAY init --models ... --efforts ...` and tell them `relay status` shows what is in effect.
 
 ### `/relay run`
 
@@ -83,6 +83,7 @@ If the environment variable `RELAY_KIND` (or `CLAUDE_RELAY`) is set, you were st
 | `claude` | `claude` | executable override for the chosen preset (e.g. a full path) |
 | `model` | `""` | model flag for sessions (empty = CLI default) |
 | `models` | `{plan,worker,review,accept: ""}` | per-role model override; empty falls back to `model`, then the CLI default. See "Models per role" |
+| `effort` / `efforts` | `""` / per role `""` | reasoning effort, same fallback as `model`/`models`. Claude Code `--effort` (`low`, `medium`, `high`); Codex `-c model_reasoning_effort=<level>`; custom `{effort}`; Gemini has no equivalent |
 | `permissionMode` | `acceptEdits` | Claude Code `--permission-mode` |
 | `allowedTools` | `[]` | Claude Code: extra `--allowedTools` rules on top of the always-allowed git verbs, `mkdir` and the verify command (headless sessions cannot ask for permission) |
 | `extraArgs` | `[]` | extra CLI args passed to every session |

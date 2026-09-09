@@ -177,3 +177,23 @@ test("relay init --models validates roles and writes them; relay plan runs one s
   assert.equal(call.model, "plan-m");
   assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" }).includes("PLAN.md"), true, "plan is left uncommitted for review");
 });
+
+test("per-role efforts: {effort} in a custom command, RELAY_EFFORT in env, fallback to `effort`", () => {
+  const { dir } = freshRepo(PLAN, {
+    effort: "medium",
+    efforts: { worker: "low", review: "high" },
+    command: [process.execPath, FAKE, "--effort", "{effort}", "--model", "{model}"],
+  });
+  const r = relay(dir, ["run"]);
+  assert.equal(r.code, 0, r.out);
+  const calls = fs.readFileSync(path.join(dir, ".relay", "fake-calls.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const byRole = Object.fromEntries(calls.map((c) => [c.role, c]));
+  assert.deepEqual(byRole.worker.argv, ["--effort", "low"], "no model set: --model {model} dropped");
+  assert.equal(byRole.worker.effort, "low");
+  assert.deepEqual(byRole.review.argv, ["--effort", "high"]);
+  assert.deepEqual(byRole.accept.argv, ["--effort", "medium"]);
+  assert.match(relay(dir, ["status"]).out, /worker=\(cli default\)\/low\s+review=\(cli default\)\/high/);
+  const init = relay(dir, ["init", "--efforts", "plan=high,bogus=x"]);
+  assert.equal(init.code, 1);
+  assert.match(init.out, /--efforts: unknown role "bogus"/);
+});
