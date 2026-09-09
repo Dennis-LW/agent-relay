@@ -317,7 +317,11 @@ test("parallel: independent tasks run concurrently in worktrees, adjacent plan t
   assert.doesNotMatch(planAfter, /<<<<<<<|>>>>>>>/);
   assert.equal(execFileSync("git", ["worktree", "list"], { cwd: dir, encoding: "utf8" }).trim().split("\n").length, 1, "worktrees cleaned up");
   assert.doesNotMatch(execFileSync("git", ["branch"], { cwd: dir, encoding: "utf8" }), /relay\//);
-  void log;
+  // the batch leaves one combined note (T3 then overwrites it, as any later worker does)
+  assert.ok(log().includes("handoff: combine T1, T2"), log().join(" | "));
+  const combined = execFileSync("git", ["show", "HEAD~1:.relay/HANDOFF.md"], { cwd: dir, encoding: "utf8" });
+  assert.match(combined, /## From T1\n\ndid T1/, "T1's handoff survives the batch");
+  assert.match(combined, /## From T2\n\ndid T2/);
 });
 
 test("parallel: a real file conflict aborts that merge and the task is retried alone", () => {
@@ -328,4 +332,52 @@ test("parallel: a real file conflict aborts that merge and the task is retried a
   assert.match(r.out, /\] task T2: independent\n/, "T2 re-run sequentially afterwards");
   assert.match(relay(dir, ["status"]).out, /3 done \/ 0 open/);
   assert.equal(fs.readFileSync(path.join(dir, "shared.txt"), "utf8").trim(), "T3");
+});
+
+const AUTO_PLAN = `# Plan: auto
+
+## Verify
+\`true\`
+
+## Tasks
+- [ ] T1: store
+  - Files: src/store.mjs, test/store.test.mjs
+  - Depends: none
+- [ ] T2: logic
+  - Files: src/todos.mjs
+  - Depends: none
+- [ ] T3: readme touches store dir
+  - Files: README.md, src/
+  - Depends: none
+- [ ] T4: no files line
+  - Depends: none
+- [ ] T5: wiring
+  - Files: bin/todo.mjs
+  - Depends: T1, T2
+`;
+
+test("parallel auto: batches only tasks with satisfied Depends and disjoint Files; unknown Files stay sequential", () => {
+  const { dir } = freshRepo(AUTO_PLAN, { parallel: "auto", parallelMax: 3, reviewEvery: 0, acceptance: false });
+  const r = relay(dir, ["run"], { FAKE_LOG: path.join(os.tmpdir(), `relay-auto-${process.pid}.log`) });
+  assert.equal(r.code, 0, r.out);
+  // batch 1: T3's "src/" overlaps T1/T2's files and T4 has no Files line, so both are left out.
+  // batch 2: T3 and T5 (deps now satisfied) are disjoint; T4 (unknown files) still runs alone.
+  assert.match(r.out, /parallel batch: T1, T2 \(auto: independent, disjoint Files\)/);
+  const batches = [...r.out.matchAll(/parallel batch: ([^\n(]+)/g)].map((m) => m[1].trim());
+  assert.deepEqual(batches, ["T1, T2", "T3, T5"]);
+  assert.match(r.out, /\] task T4: no files line\n/, "T4 ran sequentially");
+  assert.match(relay(dir, ["status"]).out, /5 done \/ 0 open/);
+  // a plan without Depends lines never goes parallel in auto mode
+  const { dir: seq } = freshRepo(PLAN, { parallel: "auto", reviewEvery: 0, acceptance: false });
+  assert.doesNotMatch(relay(seq, ["run"]).out, /parallel batch/);
+  assert.match(relay(seq, ["status"]).out, /3 done \/ 0 open/);
+});
+
+test("parallel auto: stays sequential for an hour after a rate limit", () => {
+  const { dir } = freshRepo(AUTO_PLAN, { parallel: "auto", reviewEvery: 0, acceptance: false });
+  const sp = path.join(dir, ".relay", "state.json");
+  fs.writeFileSync(sp, JSON.stringify({ lastRateLimitAt: new Date().toISOString(), runs: [] }));
+  const r = relay(dir, ["run", "--once"]);
+  assert.doesNotMatch(r.out, /parallel batch/);
+  assert.match(r.out, /task T1 done/);
 });

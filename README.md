@@ -6,6 +6,8 @@ Works with **Claude Code** (default), **OpenAI Codex CLI**, **Gemini CLI**, or a
 
 [繁體中文](README.zh-TW.md)
 
+> Worth it for jobs that take more than an hour, run unattended, or get cut off by usage limits. For a task you would finish in one sitting, doing it directly in a conversation is cheaper: two benchmarks on a 15-minute project put the relay overhead at about half the cost.
+
 ## Why
 
 A single long agent session slowly gets worse: the context fills with stale reasoning, earlier mistakes become "facts", and one usage-limit hit ends the whole run. Compaction delays this; it does not fix it.
@@ -173,7 +175,8 @@ relay stop                                      stop a background runner
 | `allowedTools` | `[]` | Claude Code: extra `--allowedTools` rules. `git add/commit/status/diff/log`, `mkdir` and the verify command are always allowed, because headless sessions cannot ask |
 | `extraArgs` | `[]` | extra CLI args passed to every session |
 | `sessionTimeoutMinutes` | `45` | hard kill per session |
-| `parallel` | `1` | max concurrent workers; >1 runs tasks with satisfied `Depends:` in separate git worktrees (see "Parallel workers") |
+| `parallel` | `"auto"` | `"auto"`: run tasks together only when their `Depends:` are satisfied and their `Files:` do not overlap, up to `parallelMax`, and stay sequential for an hour after a rate limit; a number forces that many; `1` = never (see "Parallel workers") |
+| `parallelMax` | `3` | cap for `"auto"` |
 | `profile` | `standard` | `light` \| `standard` \| `thorough`; set by `relay init --profile`, just presets for the three keys below |
 | `context` | `.relay/CONTEXT.md` | project brief written by the plan session and injected into every prompt |
 | `reviewEvery` | `3` | review after this many tasks (0 = never); commits still unreviewed at the end are reviewed inside the acceptance session |
@@ -198,7 +201,7 @@ The runner re-reads the plan file at the start of every loop, so you can edit it
 
 ## Parallel workers
 
-`"parallel": 2` (or more) runs independent tasks at the same time, each in its own git worktree on a `relay/<id>` branch, and merges them back in plan order. Independence is declared in the plan, so nothing runs together unless you say so:
+By default (`"parallel": "auto"`) the runner decides per batch: tasks run together only when the plan marks them independent (`Depends:` satisfied) **and** their `Files:` lines do not overlap, at most `parallelMax` at once, each in its own git worktree on a `relay/<id>` branch, merged back in plan order. A plan without `Depends:` lines never goes parallel; a task without a `Files:` line is assumed to touch everything and runs alone; after a rate limit the runner stays sequential for an hour, since parallel sessions only hit it again sooner. `"parallel": 2` forces a fixed width, `1` disables it. The plan session adds `Files:` and `Depends:` lines automatically:
 
 ```markdown
 - [ ] T2: API client
@@ -208,7 +211,7 @@ The runner re-reads the plan file at the start of every loop, so you can edit it
   - Depends: T2, T3
 ```
 
-A task without a `Depends:` line depends on every task before it (the sequential default). Conflicts in the plan/handoff files are resolved automatically (the tick is re-applied, the newest handoff wins); a conflict in any other file aborts that merge and the task is re-run alone afterwards. After a batch merges, the verify command runs once more; if the combination fails where each task passed, an `M<n>` fix task is added. Parallelism saves wall time, not tokens: on a subscription you reach the usage window faster.
+A task without a `Depends:` line depends on every task before it (the sequential default). Conflicts in the plan/handoff files are resolved automatically (the tick is re-applied); after a batch the handoffs of all merged tasks are combined into one note, one section per task; a conflict in any other file aborts that merge and the task is re-run alone afterwards. After a batch merges, the verify command runs once more; if the combination fails where each task passed, an `M<n>` fix task is added. Parallelism saves wall time, not tokens: on a subscription you reach the usage window faster.
 
 ## Models per role
 
@@ -243,7 +246,7 @@ Effort works the same way: `effort` for all roles, `efforts` per role, e.g. `rel
 
 ## Permissions and safety
 
-Sessions run headless, and a headless `claude -p` session cannot ask for permission: any tool call that is not pre-allowed is silently denied. The runner therefore always passes `--allowedTools` for `git add/commit/status/diff/log`, `mkdir` and the verify command; add more through `allowedTools` in the config. If a session is still denied a tool, the runner stops at once and prints the denied command instead of retrying. Claude Code uses `--permission-mode acceptEdits` (edits auto-approved, other Bash calls follow your allow/deny rules; set `"permissionMode": "bypassPermissions"` only inside a sandbox you trust). Codex runs `exec --full-auto` and Gemini runs `--yolo`, which are their unattended modes. Workers are told never to push and never to rewrite history.
+Sessions run headless, and a headless `claude -p` session cannot ask for permission: any tool call that is not pre-allowed is silently denied. The runner therefore always passes `--allowedTools` for `git add/commit/status/diff/log`, `mkdir` and the verify command; add more through `allowedTools` in the config. If a session is still denied a tool, the runner stops at once and prints the denied command instead of retrying. Claude Code uses `--permission-mode acceptEdits` (edits auto-approved, other Bash calls follow your allow/deny rules; set `"permissionMode": "bypassPermissions"` only inside a sandbox you trust). Codex runs `exec --full-auto` and Gemini runs `--yolo`, which are their unattended modes. The prompt is always piped on stdin (never put on the command line), and on Windows every argument is quoted for cmd.exe. Workers are told never to push and never to rewrite history.
 
 Every session's prompt and result are written to `.relay/logs/`.
 
@@ -251,6 +254,7 @@ Every session's prompt and result are written to `.relay/logs/`.
 
 - `npm test` runs the runner loop end to end against `test/fake-agent.mjs`, a stand-in agent that ticks and commits without calling a model. It covers the review gate, acceptance, failure/give-up, permission denials, rate-limit detection and plan parsing. No tokens are spent.
 - Every session's tokens and cost are recorded in `.relay/state.json` (from the CLI's JSON output) and summed by `relay status`.
+- `node bench/trigger-eval.mjs` checks that the skill triggers on the right phrasing and stays quiet otherwise: one headless turn per phrase (10 positive, 10 negative, Chinese and English) with the plugin loaded, reporting hit rates. Cheap on Haiku.
 - `node bench/bench.mjs` builds the same plan as (a) a relay and (b) one long session, N times each, then runs the verify command and a clean judge session on every result. It prints a cost estimate and only spends tokens with `--yes`. See the header of the script for options.
 
 ## Limits

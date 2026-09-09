@@ -1,6 +1,6 @@
 ---
 name: relay
-description: Run a long, multi-step coding task as a relay of short fresh agent sessions (plan → worker sessions → review → acceptance) with durable state in git. Works with Claude Code, OpenAI Codex CLI, Gemini CLI or any CLI agent. Use when the user wants to hand over a big job (build a feature/system end to end, large refactor, long migration) to run unattended, wants to avoid long-session quality decay, or wants work to resume automatically after rate limits. Subcommands - /relay plan, /relay run, /relay add, /relay status, /relay stop.
+description: Hand a big coding job off to run unattended as a relay of short fresh agent sessions (plan → one worker session per task → review → acceptance), state in git, auto-resume after rate limits; works with Claude Code, Codex CLI, Gemini CLI or any CLI agent. USE THIS SKILL instead of implementing yourself whenever the user wants work done in the background, while they are away, overnight or unattended; says "relay", "接力", "拆成小任務一個一個做", "背景跑", "跑一整晚", "無人值守", "被限流也自己繼續"; wants to avoid one long session degrading; or hands over a whole spec, feature, refactor or migration to be finished end to end (e.g. "把 docs/spec.md 整個實作完", "implement the whole spec and accept it"). Invoke it first, before exploring the repo; the plan step does the exploring. Not for single small tasks the user is watching. Subcommands - /relay plan, /relay run, /relay status, /relay add, /relay stop.
 ---
 
 # Relay
@@ -37,7 +37,7 @@ You produce the plan; the runner does not. Steps:
    - **Verify section** is one command that must pass after every task. If the project has none, make the first task create one.
    - Use ids `T1, T2, ...`. Review sessions append `R<n>`, acceptance appends `A<n>`, post-merge fixes `M<n>`; do not use those prefixes yourself.
    - **Pick a profile**: `--profile light` for up to ~5 tasks (one combined review+acceptance at the end), `standard` otherwise, `thorough` for risky changes.
-   - If the user wants tasks to run in parallel, set `"parallel": 2` (or more) in the config and add `- Depends: none` / `- Depends: T1, T2` lines to tasks that are genuinely independent (different files). Tasks without a `Depends:` line stay sequential.
+   - Always give each task a `- Files:` line and a `- Depends:` line (`none` or ids); with the default `"parallel": "auto"` the runner uses them to run disjoint independent tasks together, and never parallelises a plan without them. Annotate, do not reshape the plan for parallelism.
 5. Set `verify` in `.relay/config.json` if not already set, and `notes` for any platform-specific instructions workers need (e.g. "activate the venv with ...").
 6. Show the user the task list and ask them to confirm before running. Suggest they commit the plan.
 
@@ -94,7 +94,7 @@ If the environment variable `RELAY_KIND` (or `CLAUDE_RELAY`) is set, you were st
 | `allowedTools` | `[]` | Claude Code: extra `--allowedTools` rules on top of the always-allowed git verbs, `mkdir` and the verify command (headless sessions cannot ask for permission) |
 | `extraArgs` | `[]` | extra CLI args passed to every session |
 | `sessionTimeoutMinutes` | `45` | hard kill per session |
-| `parallel` | `1` | >1 runs tasks whose `Depends:` are satisfied concurrently in git worktrees; tasks without a `Depends:` line depend on all earlier tasks |
+| `parallel` | `"auto"` | `"auto"` runs tasks together only when `Depends:` are satisfied and `Files:` do not overlap (max `parallelMax`, sequential for an hour after a rate limit); a number forces that width; `1` disables |
 | `profile` | `standard` | `light` (no mid-run reviews, one combined review+acceptance) \| `standard` \| `thorough` (review every task); set with `init --profile` |
 | `context` | `.relay/CONTEXT.md` | project brief written by the plan session, injected into every prompt |
 | `reviewEvery` | `3` | review session after this many completed tasks (0 = never); commits still unreviewed at the end are reviewed inside the acceptance session |

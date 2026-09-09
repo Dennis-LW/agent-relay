@@ -6,6 +6,8 @@
 
 [English](README.md)
 
+> 適合超過一小時、無人值守、或會被用量上限打斷的工作。一次坐著就能做完的任務，直接在對話裡做比較省：在一個 15 分鐘的小專案上做的兩次 benchmark，relay 的管理開銷約佔總費用一半。
+
 ## 為什麼需要
 
 單一長 agent session 會慢慢變差：context 塞滿過時的推理、早期的錯誤變成「事實」、一次 usage limit 就讓整個作業停擺。自動壓縮只能延後這件事，不能解決。
@@ -173,7 +175,8 @@ relay stop                                      停止背景 runner
 | `allowedTools` | `[]` | Claude Code：額外的 `--allowedTools` 規則。`git add/commit/status/diff/log`、`mkdir` 與 verify 指令永遠放行，因為無人值守的 session 沒辦法問你 |
 | `extraArgs` | `[]` | 附加到每個 session 的額外 CLI 參數 |
 | `sessionTimeoutMinutes` | `45` | 每個 session 的強制逾時 |
-| `parallel` | `1` | 同時最多幾個 worker；>1 時 `Depends:` 已滿足的任務會在各自的 git worktree 平行跑（見「平行 worker」） |
+| `parallel` | `"auto"` | `"auto"`：只在任務的 `Depends:` 已滿足且 `Files:` 不重疊時一起跑，最多 `parallelMax` 個，撞過 rate limit 後一小時內維持序列；填數字就固定寬度；`1` = 永不平行（見「平行 worker」） |
+| `parallelMax` | `3` | `"auto"` 的上限 |
 | `profile` | `standard` | `light` \| `standard` \| `thorough`；由 `relay init --profile` 設定，只是下面三個鍵的預設組合 |
 | `context` | `.relay/CONTEXT.md` | plan session 寫的專案簡介，注入每個 prompt |
 | `reviewEvery` | `3` | 每完成幾項就審查一次（0 = 不審）；最後還沒審的 commit 會在 acceptance session 裡一起審 |
@@ -198,7 +201,7 @@ runner 每個迴圈開始都會重新讀計畫檔，所以 `relay run` 跑著的
 
 ## 平行 worker
 
-`"parallel": 2`（或更多）會同時跑彼此獨立的任務，每個在自己的 git worktree 和 `relay/<id>` 分支上，完成後依計畫順序合併回來。獨立性由計畫宣告，沒宣告的不會一起跑：
+預設 `"parallel": "auto"`，runner 每一批自己決定：只有計畫標了獨立（`Depends:` 已滿足）**而且** `Files:` 不重疊的任務才一起跑，最多 `parallelMax` 個，每個在自己的 git worktree 和 `relay/<id>` 分支上，完成後依計畫順序合併回來。沒有 `Depends:` 的計畫永遠序列；沒寫 `Files:` 的任務視為會碰到所有檔案、單獨跑；撞過 rate limit 後一小時內維持序列，因為平行只會更快再撞一次。`"parallel": 2` 固定寬度，`1` 關閉。plan session 會自動補上 `Files:` 和 `Depends:`：
 
 ```markdown
 - [ ] T2: API client
@@ -208,7 +211,7 @@ runner 每個迴圈開始都會重新讀計畫檔，所以 `relay run` 跑著的
   - Depends: T2, T3
 ```
 
-沒有 `Depends:` 的任務等於依賴它前面所有任務（也就是原本的序列行為）。計畫檔和交接檔的衝突會自動解（重新打勾、交接取最新）；其他檔案的衝突會放棄該次合併，之後讓那個任務單獨重跑。一批合併完會再跑一次 verify，若各自通過但合起來失敗，會補一個 `M<n>` 修正任務。平行省的是時間不是 token：訂閱方案會更快碰到用量視窗。
+沒有 `Depends:` 的任務等於依賴它前面所有任務（也就是原本的序列行為）。計畫檔和交接檔的衝突會自動解（重新打勾）；一批合併完後，所有任務的交接會合成一份、每個任務一節；其他檔案的衝突會放棄該次合併，之後讓那個任務單獨重跑。一批合併完會再跑一次 verify，若各自通過但合起來失敗，會補一個 `M<n>` 修正任務。平行省的是時間不是 token：訂閱方案會更快碰到用量視窗。
 
 ## 各角色的模型
 
@@ -243,7 +246,7 @@ effort 也是同一套：`effort` 全部角色共用，`efforts` 各角色分開
 
 ## 權限與安全
 
-session 無人值守執行，而 `claude -p` 無頭模式沒辦法跳出權限詢問：沒有事先放行的工具呼叫會被靜默拒絕。所以 runner 一律帶 `--allowedTools` 放行 `git add/commit/status/diff/log`、`mkdir` 與 verify 指令；要更多就在設定的 `allowedTools` 加。若 session 仍被拒絕某個工具，runner 會立刻停下並印出被拒的指令，不會重試燒 token。Claude Code 用 `--permission-mode acceptEdits`（編輯自動核准，其他 Bash 呼叫仍遵守 allow/deny 規則；`"permissionMode": "bypassPermissions"` 只建議在信任的沙箱裡用）。Codex 用 `exec --full-auto`、Gemini 用 `--yolo`，都是各自的無人值守模式。worker 被明確要求不 push、不改寫歷史。
+session 無人值守執行，而 `claude -p` 無頭模式沒辦法跳出權限詢問：沒有事先放行的工具呼叫會被靜默拒絕。所以 runner 一律帶 `--allowedTools` 放行 `git add/commit/status/diff/log`、`mkdir` 與 verify 指令；要更多就在設定的 `allowedTools` 加。若 session 仍被拒絕某個工具，runner 會立刻停下並印出被拒的指令，不會重試燒 token。Claude Code 用 `--permission-mode acceptEdits`（編輯自動核准，其他 Bash 呼叫仍遵守 allow/deny 規則；`"permissionMode": "bypassPermissions"` 只建議在信任的沙箱裡用）。Codex 用 `exec --full-auto`、Gemini 用 `--yolo`，都是各自的無人值守模式。 prompt 一律從 stdin 餵入（不放在命令列上），Windows 上每個參數都會為 cmd.exe 加引號。worker 被明確要求不 push、不改寫歷史。
 
 每個 session 的 prompt 與結果都會寫到 `.relay/logs/`。
 
@@ -251,6 +254,7 @@ session 無人值守執行，而 `claude -p` 無頭模式沒辦法跳出權限�
 
 - `npm test` 用 `test/fake-agent.mjs`（一個不呼叫模型、只負責打勾與 commit 的假 agent）把 runner 迴圈整個跑一遍：review gate、acceptance、失敗放棄、權限被拒、rate-limit 偵測、計畫解析。完全不花 token。
 - 每個 session 的 token 與費用都會從 CLI 的 JSON 輸出記進 `.relay/state.json`，`relay status` 會加總顯示。
+- `node bench/trigger-eval.mjs` 檢查 skill 在該觸發的說法會觸發、不該的不會：每句話跑一個無頭 turn（正反各 10 句，中英文），回報命中率。用 Haiku 跑很便宜。
 - `node bench/bench.mjs` 把同一份計畫分別用 (a) relay 與 (b) 單一長 session 各做 N 次，每次都跑 verify 指令並由一個乾淨的 judge session 評分。它會先印出費用估計，加 `--yes` 才真的花 token。選項見腳本開頭。
 
 ## 限制

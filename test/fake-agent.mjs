@@ -45,8 +45,8 @@ if (kind === "plan") {
   const s = fs.readFileSync(plan, "utf8");
   const re = new RegExp(`^- \\[ \\] (${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[:.].*)$`, "m");
   fs.writeFileSync(plan, s.replace(re, "- [x] $1"));
-  sh(`git add -A && git commit -qm "${id}: done"`);
   fs.writeFileSync(".relay/HANDOFF.md", `# Handoff\n\ndid ${id}\n`);
+  sh(`git add -A && git commit -qm "${id}: done"`);
 } else if (kind === "review") {
   fs.mkdirSync(".relay/reviews", { recursive: true });
   fs.writeFileSync(".relay/reviews/review-test.md", "1 finding\n");

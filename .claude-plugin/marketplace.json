@@ -16,6 +16,6 @@
   ],
   "metadata": {
     "description": "Marketplace for the relay plugin: long tasks as a relay of short fresh agent sessions (Claude Code, Codex CLI, Gemini CLI or any CLI agent).",
-    "version": "0.1.0"
+    "version": "0.2.0"
   }
 }

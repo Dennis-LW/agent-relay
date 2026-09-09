@@ -42,10 +42,12 @@ const DEFAULT_CONFIG = {
   allowedTools: [],
   extraArgs: [],
   sessionTimeoutMinutes: 45,
-  // Max worker sessions at once. >1 runs independent tasks in separate git
-  // worktrees and merges them back; tasks declare independence with a
-  // `- Depends: T1, T2` / `- Depends: none` line (no line = depends on every earlier task).
-  parallel: 1,
+  // Worker sessions at once. "auto" (default) runs tasks together only when the
+  // plan says they are independent (`- Depends:` satisfied) AND their `- Files:`
+  // lists do not overlap, up to `parallelMax`, and drops to 1 for a while after
+  // a rate limit. A number forces that many (Depends still required); 1 = sequential.
+  parallel: "auto",
+  parallelMax: 3,
   profile: "standard", // light | standard | thorough — see PROFILES
   reviewEvery: 3,
   acceptance: true,
@@ -192,12 +194,15 @@ function parsePlan(planPath) {
         raw: title,
         body: [],
         deps: null, // null = implicit: every earlier task
+        files: null, // null = unknown (treated as overlapping everything in auto mode)
       };
       tasks.push(cur);
     } else if (cur && /^\s+\S/.test(line)) {
       cur.body.push(line.trim());
       const d = line.trim().match(/^-?\s*Depends:\s*(.*)$/i);
       if (d) cur.deps = /^(none|-|nothing)?$/i.test(d[1].trim()) ? [] : d[1].split(/[,\s]+/).filter(Boolean);
+      const f = line.trim().match(/^-?\s*Files:\s*(.*)$/i);
+      if (f) cur.files = f[1].split(/[,\s]+/).map((x) => x.replace(/[`()]/g, "").trim()).filter((x) => x && !/^(new|modified|etc\.?)$/i.test(x));
     } else if (line.trim() === "") {
       // keep body going across blank lines only if next line is indented
     } else {
@@ -210,6 +215,33 @@ function parsePlan(planPath) {
 
 function nextOpenTask(plan) {
   return plan.tasks.find((t) => t.status === "open") || null;
+}
+
+// Two tasks may run together only if neither's Files: touches the other's
+// (same path, or one inside the other). Unknown files = assume overlap.
+function filesOverlap(a, b) {
+  if (!a.files || !b.files) return true;
+  const norm = (p) => p.replace(/\\/g, "/").replace(/^\.\//, "").replace(/\/+$/, "");
+  for (const x of a.files.map(norm))
+    for (const y of b.files.map(norm)) if (x === y || x.startsWith(y + "/") || y.startsWith(x + "/")) return true;
+  return false;
+}
+
+// How many workers to run now. Numbers are taken literally; "auto" picks a
+// disjoint set (by Files:) of runnable tasks, and stays sequential for an hour
+// after a rate limit because parallel sessions only hit it again sooner.
+function pickBatch(cfg, state, runnable) {
+  if (!runnable.length) return [];
+  const mode = cfg.parallel;
+  if (mode !== "auto") return runnable.slice(0, Math.max(1, Number(mode) || 1));
+  const recentLimit = state.lastRateLimitAt && Date.now() - Date.parse(state.lastRateLimitAt) < 60 * 60 * 1000;
+  if (recentLimit) return runnable.slice(0, 1);
+  const batch = [runnable[0]];
+  for (const t of runnable.slice(1)) {
+    if (batch.length >= (cfg.parallelMax || 3)) break;
+    if (batch.every((b) => !filesOverlap(b, t))) batch.push(t);
+  }
+  return batch;
 }
 
 // Open tasks whose dependencies are all closed, in plan order.
@@ -305,12 +337,14 @@ function runClaude(proj, prompt, kind, verify = "", cwd = "") {
   const { exe, args, viaStdin } = agentCommand(cfg, prompt, verify, model, effort);
 
   return new Promise((resolve) => {
-    const child = spawn(exe, args, {
+    const child = spawn(exe, IS_WIN ? args.map(winQuote) : args, {
       cwd: root,
-      shell: IS_WIN, // resolves .cmd shims on Windows
+      shell: IS_WIN, // resolves .cmd shims on Windows (args are quoted by winQuote)
+      detached: !IS_WIN, // own process group, so killTree(-pid) reaches the agent's subprocesses too
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...childEnv(), CLAUDE_RELAY: "1", CLAUDE_RELAY_KIND: kind, RELAY_KIND: kind, RELAY_ROLE: roleOf(kind), RELAY_MODEL: model, RELAY_EFFORT: effort },
     });
+    ACTIVE_CHILDREN.add(child);
     let stdout = "";
     let stderr = "";
     let timedOut = false;
@@ -326,6 +360,7 @@ function runClaude(proj, prompt, kind, verify = "", cwd = "") {
 
     child.on("close", (code) => {
       clearTimeout(timer);
+      ACTIVE_CHILDREN.delete(child);
       let parsed = null;
       try {
         // json output is a single object; tolerate leading noise
@@ -351,6 +386,7 @@ function runClaude(proj, prompt, kind, verify = "", cwd = "") {
     });
     child.on("error", (e) => {
       clearTimeout(timer);
+      ACTIVE_CHILDREN.delete(child);
       fs.writeFileSync(`${logBase}.result.md`, `# ${kind} — spawn error\n\n${e.stack || e}\n`);
       resolve({ code: -1, timedOut: false, isError: true, rateLimited: false, resultText: "", stderr: String(e), usage: null, denials: [], logBase, model, effort });
     });
@@ -392,11 +428,13 @@ function agentCommand(cfg, prompt, verify = "", modelName = "", effort = "") {
         viaStdin: true,
       };
     case "gemini":
-      // Google Gemini CLI: -p prompt, --yolo auto-approves tool calls.
+      // Google Gemini CLI: --yolo auto-approves tool calls. The prompt is piped
+      // on stdin (non-interactive mode) rather than passed as -p, so a long
+      // markdown prompt never has to survive the command line (Windows quoting).
       return {
         exe: cfg.claude === "claude" ? "gemini" : cfg.claude,
-        args: ["--yolo", ...(modelName ? ["-m", modelName] : []), ...extra, "-p", prompt],
-        viaStdin: false,
+        args: ["--yolo", ...(modelName ? ["-m", modelName] : []), ...extra],
+        viaStdin: true,
       };
     case "custom": {
       if (!cfg.command?.length) throw new Error('agent "custom" needs "command": [exe, ...args] in .relay/config.json');
@@ -476,6 +514,18 @@ function childEnv() {
   const env = { ...process.env };
   for (const k of Object.keys(env)) if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) delete env[k];
   return env;
+}
+
+const ACTIVE_CHILDREN = new Set();
+function killActiveChildren() {
+  for (const c of ACTIVE_CHILDREN) killTree(c.pid);
+}
+
+// With shell:true on Windows, Node joins args verbatim; quote anything cmd.exe
+// would split or interpret (spaces, parentheses, pipes, quotes...).
+function winQuote(a) {
+  if (a === "" || /[\s"()<>|&^%]/.test(a)) return `"${a.replace(/"/g, '\\"')}"`;
+  return a;
 }
 
 function killTree(pid) {
@@ -567,6 +617,7 @@ async function runParallelBatch(proj, plan, tasks) {
     }
   });
   const results = [];
+  const handoffs = [];
   for (const s of started) {
     if (s.error) {
       results.push({ task: s.task, outcome: "failed", why: String(s.error.message || s.error), res: null });
@@ -579,6 +630,12 @@ async function runParallelBatch(proj, plan, tasks) {
     const ticked = afterTask && afterTask.status === "done";
     const skipped = afterTask && afterTask.status === "skipped";
     const committed = gitHead(s.wt.dir) !== s.base;
+    // Capture this worker's handoff before its branch is dropped, so the batch
+    // can leave one combined note instead of only the last merge's.
+    const handoffRel = path.relative(proj.root, proj.handoffPath).split(path.sep).join("/");
+    const hoPath = path.join(s.wt.dir, handoffRel);
+    const hoText = exists(hoPath) ? readText(hoPath) : git(proj.root, ["show", `${s.wt.branch}:${handoffRel}`]).out;
+    if (hoText && hoText.trim()) handoffs.push({ id: s.task.id, text: hoText.trim().replace(/^# Handoff\s*/i, "").trim() });
     if (!res.isError && ticked && (!proj.cfg.commitRequired || committed)) {
       const merged = mergeTaskBranch(proj, s.task, s.wt);
       if (merged.ok) results.push({ task: s.task, outcome: "done", res, why: merged.resolved ? `merged (auto-resolved ${merged.resolved.join(", ")})` : "merged" });
@@ -591,6 +648,14 @@ async function runParallelBatch(proj, plan, tasks) {
       results.push({ task: s.task, outcome: "failed", res, why });
     }
     dropWorktree(proj, s.wt);
+  }
+  const mergedIds = results.filter((r) => r.outcome === "done" || r.outcome === "skipped").map((r) => r.task.id);
+  if (mergedIds.length > 1) {
+    const parts = handoffs.filter((h) => mergedIds.includes(h.id)).map((h) => `## From ${h.id}\n\n${h.text}`);
+    if (parts.length) {
+      fs.writeFileSync(proj.handoffPath, `# Handoff\n\n(${mergedIds.join(", ")} ran in parallel; one note per task)\n\n${parts.join("\n\n")}\n`);
+      git(proj.root, ["commit", "-q", "-m", `handoff: combine ${mergedIds.join(", ")}`, "--", path.relative(proj.root, proj.handoffPath)]);
+    }
   }
   return results;
 }
@@ -635,8 +700,8 @@ async function planSession(proj, description) {
     PLATFORM: process.platform,
     TEMPLATE: readText(path.join(SKILL_DIR, "templates", "PLAN.md")),
     PARALLEL:
-      cfg.parallel > 1
-        ? `The runner will execute up to ${cfg.parallel} tasks concurrently, each in its own git worktree, then merge. Mark independence explicitly: give every task that touches different files from its predecessors a \`- Depends: <ids>\` line (\`- Depends: none\` when it needs nothing). A task without a Depends line waits for every earlier task. Two tasks that edit the same file must NOT be independent, or their merge will conflict. Shape the plan so that the middle tasks can run side by side (e.g. separate modules first, wiring last).`
+      cfg.parallel === "auto" || Number(cfg.parallel) > 1
+        ? `The runner may execute independent tasks concurrently in separate git worktrees. Annotate, do not reshape: keep the natural task breakdown, and give every task a \`- Files:\` line (the files/dirs it will create or edit) and a \`- Depends: <ids>\` line (\`- Depends: none\` if it needs nothing done first). A task without a Depends line waits for every earlier task. Two tasks that edit the same file must depend on each other.`
         : "Tasks run one at a time in order; no Depends lines needed.",
   };
   return runClaude(proj, render(loadPrompt("plan"), vars), "plan");
@@ -930,8 +995,8 @@ async function cmdRun(proj, flags) {
       fs.unlinkSync(proj.pidPath);
     } catch {}
   };
-  process.on("SIGINT", () => (cleanup(), process.exit(130)));
-  process.on("SIGTERM", () => (cleanup(), process.exit(143)));
+  process.on("SIGINT", () => (killActiveChildren(), cleanup(), process.exit(130)));
+  process.on("SIGTERM", () => (killActiveChildren(), cleanup(), process.exit(143)));
 
   if (!git(proj.root, ["rev-parse", "--is-inside-work-tree"]).ok) {
     console.error("relay requires a git repository (commits are the durable state).");
@@ -941,7 +1006,8 @@ async function cmdRun(proj, flags) {
 
   log(`runner start — agent ${cfg.agent}, plan ${path.relative(proj.root, proj.planPath)}, timeout ${cfg.sessionTimeoutMinutes}m/session`);
   log(`models: ${describeModels(cfg)}`);
-  if (cfg.parallel > 1) log(`parallel: up to ${cfg.parallel} workers in git worktrees (tasks need "Depends:" lines to run together)`);
+  if (cfg.parallel === "auto") log(`parallel: auto (up to ${cfg.parallelMax} workers when tasks have Depends: satisfied and disjoint Files:)`);
+  else if (Number(cfg.parallel) > 1) log(`parallel: up to ${cfg.parallel} workers in git worktrees (tasks need "Depends:" lines to run together)`);
 
   for (;;) {
     const st = loadState(proj.statePath);
@@ -1023,9 +1089,10 @@ async function cmdRun(proj, flags) {
 
     // Parallel workers (opt-in): run every runnable independent task at once.
     const conflicted = new Set(st.conflicted || []);
-    const batch = cfg.parallel > 1 && !dry ? runnableTasks(plan).filter((t) => !conflicted.has(t.id)).slice(0, cfg.parallel) : [];
+    const parallelOn = cfg.parallel === "auto" || Number(cfg.parallel) > 1;
+    const batch = parallelOn && !dry ? pickBatch(cfg, st, runnableTasks(plan).filter((t) => !conflicted.has(t.id))) : [];
     if (batch.length > 1 || (batch.length === 1 && batch[0].id !== task.id)) {
-      log(`parallel batch: ${batch.map((t) => t.id).join(", ")}`);
+      log(`parallel batch: ${batch.map((t) => t.id).join(", ")}${cfg.parallel === "auto" ? " (auto: independent, disjoint Files)" : ""}`);
       const results = await runParallelBatch(proj, plan, batch);
       let failures = 0;
       let worst = null;
@@ -1147,6 +1214,7 @@ function record(state, kind, outcome, res, note) {
 async function handleFailure(proj, state, res, why = "") {
   const { cfg } = proj;
   state.consecutiveFailures++;
+  if (res?.rateLimited) state.lastRateLimitAt = new Date().toISOString();
   writeJson(proj.statePath, state);
   if (state.consecutiveFailures >= cfg.maxConsecutiveFailures) {
     log(`giving up after ${state.consecutiveFailures} consecutive failures (${why}). Check .relay/logs and HANDOFF, then \`relay run\` again.`);

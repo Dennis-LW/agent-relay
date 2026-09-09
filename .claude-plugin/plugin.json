@@ -1,9 +1,17 @@
 {
   "name": "relay",
-  "description": "Run long, multi-step coding tasks as a relay of short fresh agent sessions (Claude Code, Codex CLI, Gemini CLI or any CLI agent) — plan, work, review, accept — with durable state in git, so quality doesn't decay and rate-limit pauses just resume.",
-  "version": "0.1.0",
-  "author": { "name": "Dennis-LW" },
+  "description": "Run long, multi-step coding tasks as a relay of short fresh agent sessions (Claude Code, Codex CLI, Gemini CLI or any CLI agent) \u2014 plan, work, review, accept \u2014 with durable state in git, so quality doesn't decay and rate-limit pauses just resume.",
+  "version": "0.2.0",
+  "author": {
+    "name": "Dennis-LW"
+  },
   "homepage": "https://github.com/Dennis-LW/agent-relay",
   "license": "MIT",
-  "keywords": ["claude-code", "skill", "automation", "long-running", "relay"]
+  "keywords": [
+    "claude-code",
+    "skill",
+    "automation",
+    "long-running",
+    "relay"
+  ]
 }

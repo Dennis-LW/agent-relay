@@ -1,6 +1,6 @@
 {
   "name": "agent-relay",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Run long coding tasks as a relay of short, fresh Claude Code sessions with durable state in git.",
   "type": "module",
   "bin": {
