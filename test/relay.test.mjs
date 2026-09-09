@@ -243,3 +243,37 @@ test("CONTEXT.md written by the plan session is injected into worker prompts", (
   const dry = relay(dir, ["run", "--dry-run"]).out;
   assert.match(dry, /## Project context\n\n# Context\n\nfake project brief/);
 });
+
+test("relay add inserts a task (end, or after an id), commits only the plan, and the running loop picks it up", () => {
+  const { dir, log } = freshRepo(PLAN);
+  let r = relay(dir, ["add", "extra", "work", "--accept", "out-T4.txt exists"]);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /added T4: extra work, committed/);
+  r = relay(dir, ["add", "squeeze in", "--after", "T1", "--id", "T9", "--accept", "out-T9.txt exists"]);
+  assert.match(r.out, /added T9: squeeze in \(after T1\), committed/);
+  const plan = fs.readFileSync(path.join(dir, ".relay", "PLAN.md"), "utf8");
+  const ids = [...plan.matchAll(/^- \[ \] (T\d+):/gm)].map((m) => m[1]);
+  assert.deepEqual(ids, ["T1", "T9", "T2", "T3", "T4"]);
+  assert.equal(log()[0], "plan: add T9");
+  assert.equal(relay(dir, ["add", "dup", "--id", "T9"]).code, 1);
+  // insert while the runner is between tasks: the next loop iteration sees it
+  relay(dir, ["run", "--once"]);
+  relay(dir, ["add", "late", "--after", "T9", "--id", "T5", "--accept", "x"]);
+  assert.match(relay(dir, ["next"]).out, /^T9: squeeze in/);
+  r = relay(dir, ["run"]);
+  assert.equal(r.code, 0, r.out);
+  assert.match(relay(dir, ["status"]).out, / 0 open \/ 0 skipped/);
+  for (const id of ["T4", "T9", "T5"]) assert.equal(fs.existsSync(path.join(dir, `out-${id}.txt`)), true, `${id} was executed`);
+});
+
+test("relay init --profile applies review cadence and is reported", () => {
+  const { dir } = freshRepo(PLAN);
+  assert.equal(relay(dir, ["init", "--profile", "medium"]).code, 1);
+  relay(dir, ["init", "--profile", "light"]);
+  const cfg = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "config.json"), "utf8"));
+  assert.equal(cfg.reviewEvery, 0);
+  assert.equal(cfg.profile, "light");
+  assert.match(relay(dir, ["status"]).out, /Profile:\s+light \(review every ∞/);
+  relay(dir, ["init", "--profile", "thorough"]);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(dir, ".relay", "config.json"), "utf8")).reviewEvery, 1);
+});

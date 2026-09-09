@@ -41,6 +41,7 @@ const DEFAULT_CONFIG = {
   allowedTools: [],
   extraArgs: [],
   sessionTimeoutMinutes: 45,
+  profile: "standard", // light | standard | thorough — see PROFILES
   reviewEvery: 3,
   acceptance: true,
   maxAcceptanceRounds: 2,
@@ -49,6 +50,15 @@ const DEFAULT_CONFIG = {
   retryMaxMinutes: 60,
   commitRequired: true,
   notes: "",
+};
+
+// How much clean-context checking a relay does. `light` suits plans of a handful
+// of tasks (one combined review+acceptance at the end); `thorough` reviews after
+// every task. Applied by `relay init --profile`; the keys stay editable afterwards.
+const PROFILES = {
+  light: { reviewEvery: 0, acceptance: true, maxAcceptanceRounds: 2 },
+  standard: { reviewEvery: 3, acceptance: true, maxAcceptanceRounds: 2 },
+  thorough: { reviewEvery: 1, acceptance: true, maxAcceptanceRounds: 3 },
 };
 
 // ---------------------------------------------------------------------------
@@ -565,6 +575,13 @@ function cmdInit(cwd, flags) {
   if (flags.agent) merged.agent = flags.agent;
   if (flags.model) merged.model = flags.model;
   if (flags.effort) merged.effort = flags.effort;
+  if (flags.profile) {
+    if (!PROFILES[flags.profile]) {
+      console.error(`--profile: unknown profile "${flags.profile}" (light | standard | thorough)`);
+      process.exit(1);
+    }
+    Object.assign(merged, PROFILES[flags.profile], { profile: flags.profile });
+  }
   // --models plan=x,worker=y,...  /  --efforts plan=high,worker=medium,...
   for (const key of ["models", "efforts"]) {
     if (!flags[key]) continue;
@@ -598,6 +615,7 @@ function cmdInit(cwd, flags) {
   log(`verify:  ${merged.verify || "(not set)"}`);
   log(`agent:   ${merged.agent}`);
   log(`models:  ${describeModels(merged)}`);
+  log(`profile: ${merged.profile} (review every ${merged.reviewEvery || "∞"} tasks, acceptance ${merged.acceptance ? "on" : "off"}, max ${merged.maxAcceptanceRounds} rounds)`);
   log("Next: fill in the plan (or run /relay plan inside Claude Code), then `relay run`.");
 }
 
@@ -633,6 +651,59 @@ async function cmdPlan(proj, args) {
   log("review the plan, commit it, then `relay run`.");
 }
 
+// `relay add "<title>" [--accept "<condition>"] [--after <id>] [--id <id>]`
+// Inserts a task into the plan (end of the list by default) and commits just the
+// plan file. Safe while the runner is running: it re-reads the plan every loop.
+function cmdAdd(proj, args, flags) {
+  const title = args.join(" ").trim();
+  if (!title) {
+    console.error('usage: relay add "<task title>" [--accept "<how to verify>"] [--after <task id>] [--id <id>]');
+    process.exit(1);
+  }
+  const plan = parsePlan(proj.planPath);
+  const lines = plan.text.split("\n");
+  const nums = plan.tasks.map((t) => Number((t.id.match(/^T(\d+)$/) || [])[1])).filter((n) => !Number.isNaN(n));
+  const id = flags.id || `T${(nums.length ? Math.max(...nums) : 0) + 1}`;
+  if (plan.tasks.some((t) => t.id === id)) {
+    console.error(`task ${id} already exists`);
+    process.exit(1);
+  }
+  const block = [`- [ ] ${id}: ${title}`, `  - Accept: ${flags.accept || "(fill in an observable condition)"}`];
+  let at;
+  if (flags.after) {
+    const anchor = plan.tasks.find((t) => t.id === flags.after);
+    if (!anchor) {
+      console.error(`--after: no task ${flags.after}`);
+      process.exit(1);
+    }
+    const next = plan.tasks[anchor.index + 1];
+    at = next ? next.line : endOfTaskList(lines, anchor.line);
+  } else if (plan.tasks.length) {
+    at = endOfTaskList(lines, plan.tasks[plan.tasks.length - 1].line);
+  } else {
+    const h = lines.findIndex((l) => /^#{1,6}\s+.*\btasks?\b/i.test(l));
+    if (h < 0) {
+      console.error("plan has no Tasks heading; add one first");
+      process.exit(1);
+    }
+    at = h + 1;
+    if (lines[at] !== "") lines.splice(at, 0, ""), at++;
+  }
+  lines.splice(at, 0, ...block);
+  fs.writeFileSync(proj.planPath, lines.join("\n"));
+  const rel = path.relative(proj.root, proj.planPath);
+  const c = git(proj.root, ["commit", "-q", "-m", `plan: add ${id}`, "--", rel]);
+  log(`added ${id}: ${title}${flags.after ? ` (after ${flags.after})` : ""}${c.ok ? ", committed" : `, NOT committed (${c.err.split("\n")[0]})`}`);
+  if (!flags.accept) log("no --accept given; edit the Accept line before the runner reaches it");
+}
+
+// line index just past a task's indented body
+function endOfTaskList(lines, taskLine) {
+  let i = taskLine + 1;
+  while (i < lines.length && /^\s+\S/.test(lines[i])) i++;
+  return i;
+}
+
 function cmdStatus(proj) {
   const plan = parsePlan(proj.planPath);
   const c = countTasks(plan);
@@ -645,6 +716,7 @@ function cmdStatus(proj) {
   console.log(`Next:     ${next ? `${next.id}: ${next.title}` : "(none — all tasks closed)"}`);
   console.log(`Runner:   ${alive ? `running (pid ${pid})` : "not running"}`);
   console.log(`Agent:    ${proj.cfg.agent}  ${describeModels(proj.cfg)}`);
+  console.log(`Profile:  ${proj.cfg.profile} (review every ${proj.cfg.reviewEvery || "∞"}, acceptance ${proj.cfg.acceptance ? "on" : "off"}, max ${proj.cfg.maxAcceptanceRounds} rounds)`);
   console.log(`Failures: ${state.consecutiveFailures} consecutive; ${state.completedSinceReview} done since last review`);
   if (state.runs.length) {
     const tot = usageTotals(state.runs);
@@ -935,8 +1007,11 @@ Usage:
   relay init [--plan <path>] [--verify "<cmd>"] [--agent claude|codex|gemini|custom]
              [--model <name>] [--models plan=a,worker=b,review=c,accept=d]
              [--effort <level>] [--efforts plan=a,worker=b,review=c,accept=d]
+             [--profile light|standard|thorough]
                                                   create .relay/ in the current project
   relay plan "<description or path to a spec>"    write the plan with one headless session (plan role's model)
+  relay add "<title>" [--accept "<cond>"] [--after <id>] [--id <id>]
+                                                  insert a task into the plan (works while the runner is running)
   relay status                                    progress, next task, runner state, handoff
   relay next                                      print the next open task
   relay run [--once] [--dry-run] [--detach]       run the relay loop (foreground by default)
@@ -960,6 +1035,8 @@ async function main() {
       return cmdInit(cwd, flags);
     case "plan":
       return cmdPlan(loadProject(cwd), _.slice(1));
+    case "add":
+      return cmdAdd(loadProject(cwd), _.slice(1), flags);
     case "status":
       return cmdStatus(loadProject(cwd));
     case "next":
