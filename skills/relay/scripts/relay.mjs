@@ -125,6 +125,7 @@ function loadState(p) {
     consecutiveFailures: 0,
     acceptanceRounds: 0,
     lastReviewHead: "",
+    reviewedBeforeAccept: false,
     runs: [],
     stopped: false,
   });
@@ -714,8 +715,13 @@ async function cmdRun(proj, flags) {
     const plan = parsePlan(proj.planPath);
     const task = nextOpenTask(plan);
 
-    // Review gate
-    if (task && cfg.reviewEvery > 0 && st.completedSinceReview >= cfg.reviewEvery) {
+    // Review gate. Also review before acceptance when unreviewed work exists, so
+    // acceptance judges reviewed code rather than the other way round.
+    // The pre-acceptance review happens at most once per acceptance round, otherwise
+    // review → fix task → review could loop forever on a picky reviewer.
+    const acceptancePending = !task && cfg.acceptance && st.acceptanceRounds < cfg.maxAcceptanceRounds;
+    const preAcceptReview = acceptancePending && st.completedSinceReview > 0 && !st.reviewedBeforeAccept;
+    if (cfg.reviewEvery > 0 && ((task && st.completedSinceReview >= cfg.reviewEvery) || preAcceptReview)) {
       log(`review gate: ${st.completedSinceReview} tasks since last review`);
       if (dry) {
         log("(dry-run) would run review session");
@@ -728,6 +734,7 @@ async function cmdRun(proj, flags) {
       if (!res.isError) {
         st.completedSinceReview = 0;
         st.lastReviewHead = head;
+        if (preAcceptReview) st.reviewedBeforeAccept = true;
       }
       writeJson(proj.statePath, st);
       if (res.isError) {
@@ -754,6 +761,7 @@ async function cmdRun(proj, flags) {
       }
       const res = await acceptanceSession(proj, plan);
       st.acceptanceRounds++;
+      st.reviewedBeforeAccept = false;
       record(st, "accept", res.isError ? "error" : "ok", res);
       writeJson(proj.statePath, st);
       if (res.isError && res.fatal) {

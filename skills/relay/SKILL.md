@@ -88,7 +88,7 @@ If the environment variable `RELAY_KIND` (or `CLAUDE_RELAY`) is set, you were st
 | `allowedTools` | `[]` | Claude Code: extra `--allowedTools` rules on top of the always-allowed git verbs, `mkdir` and the verify command (headless sessions cannot ask for permission) |
 | `extraArgs` | `[]` | extra CLI args passed to every session |
 | `sessionTimeoutMinutes` | `45` | hard kill per session |
-| `reviewEvery` | `3` | review session after this many completed tasks (0 = never) |
+| `reviewEvery` | `3` | review session after this many completed tasks (0 = never); also once before each acceptance round when unreviewed work exists |
 | `acceptance` | `true` | run the acceptance session when all tasks are ticked |
 | `maxAcceptanceRounds` | `2` | acceptance may add follow-ups; cap the loop |
 | `maxConsecutiveFailures` | `5` | give up after this many failures in a row |

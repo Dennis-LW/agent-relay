@@ -134,7 +134,7 @@ Any markdown file with `- [ ]` items under a heading containing "Tasks" works, s
 | session | when | contract |
 | --- | --- | --- |
 | worker | for each open task | do only this task → run verify → commit → tick `[x]` → overwrite HANDOFF |
-| review | every `reviewEvery` completed tasks | read the diff with a clean context, write `.relay/reviews/*.md`, append `R<n>` fix tasks for high/medium findings; never edits code |
+| review | every `reviewEvery` completed tasks, and once before each acceptance round when unreviewed work exists | read the diff with a clean context, write `.relay/reviews/*.md`, append `R<n>` fix tasks for high/medium findings; never edits code |
 | acceptance | when no open tasks remain | re-check every Accept line and the Goal for real, write `.relay/ACCEPTANCE.md`, append `A<n>` follow-ups; never edits code |
 
 A task counts as done only if the tick mark changed **and** HEAD moved. A worker that cannot finish leaves the task open (or marks it `[-]` blocked) and explains why in HANDOFF.
@@ -170,7 +170,7 @@ relay stop                                      stop a background runner
 | `allowedTools` | `[]` | Claude Code: extra `--allowedTools` rules. `git add/commit/status/diff/log`, `mkdir` and the verify command are always allowed, because headless sessions cannot ask |
 | `extraArgs` | `[]` | extra CLI args passed to every session |
 | `sessionTimeoutMinutes` | `45` | hard kill per session |
-| `reviewEvery` | `3` | review after this many tasks (0 = never) |
+| `reviewEvery` | `3` | review after this many tasks (0 = never); a review also runs before acceptance when unreviewed work exists |
 | `acceptance` | `true` | run the acceptance session at the end |
 | `maxAcceptanceRounds` | `2` | cap on acceptance → follow-up loops |
 | `maxConsecutiveFailures` | `5` | give up after this many failures in a row |

@@ -134,7 +134,7 @@ node ~/.claude/skills/relay/scripts/relay.mjs status   # 若用 npm 安裝，直
 | session | 時機 | 契約 |
 | --- | --- | --- |
 | worker | 每個未完成任務 | 只做這一項 → 跑 verify → commit → 打勾 `[x]` → 覆寫 HANDOFF |
-| review | 每完成 `reviewEvery` 項 | 用乾淨 context 讀 diff，寫 `.relay/reviews/*.md`，高/中嚴重度的發現補成 `R<n>` 任務；不改程式碼 |
+| review | 每完成 `reviewEvery` 項，以及每輪驗收前若有尚未審查的工作再審一次 | 用乾淨 context 讀 diff，寫 `.relay/reviews/*.md`，高/中嚴重度的發現補成 `R<n>` 任務；不改程式碼 |
 | acceptance | 沒有未完成任務時 | 真的逐項重跑 Accept 條件並對照 Goal，寫 `.relay/ACCEPTANCE.md`，補上 `A<n>` 後續任務；不改程式碼 |
 
 任務要同時滿足「勾選變了」**且**「HEAD 前進了」才算完成。做不完的 worker 會讓任務保持未勾選（或標成 `[-]` 表示卡住），並在 HANDOFF 說明原因。
@@ -170,7 +170,7 @@ relay stop                                      停止背景 runner
 | `allowedTools` | `[]` | Claude Code：額外的 `--allowedTools` 規則。`git add/commit/status/diff/log`、`mkdir` 與 verify 指令永遠放行，因為無人值守的 session 沒辦法問你 |
 | `extraArgs` | `[]` | 附加到每個 session 的額外 CLI 參數 |
 | `sessionTimeoutMinutes` | `45` | 每個 session 的強制逾時 |
-| `reviewEvery` | `3` | 每完成幾項就審查一次（0 = 不審） |
+| `reviewEvery` | `3` | 每完成幾項就審查一次（0 = 不審）；驗收前若有未審查的工作也會先審 |
 | `acceptance` | `true` | 最後是否跑驗收 session |
 | `maxAcceptanceRounds` | `2` | 驗收 → 補任務的迴圈上限 |
 | `maxConsecutiveFailures` | `5` | 連續失敗幾次就放棄 |

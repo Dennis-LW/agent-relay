@@ -58,16 +58,17 @@ test("happy path: workers, review gate inserts R task, acceptance ends the loop"
   const { dir, log } = freshRepo(PLAN);
   const r = relay(dir, ["run"]);
   assert.equal(r.code, 0, r.out);
-  assert.deepEqual(log(), ["acceptance: PASS", "R1: done", "T3: done", "review: 1 findings", "T2: done", "T1: done", "plan", "init"]);
+  // T3 and R1 are unreviewed when the task list empties, so a review runs before acceptance
+  assert.deepEqual(log(), ["acceptance: PASS", "R1: done", "review: 1 findings", "R1: done", "T3: done", "review: 1 findings", "T2: done", "T1: done", "plan", "init"]);
   const plan = fs.readFileSync(path.join(dir, ".relay", "PLAN.md"), "utf8");
-  assert.equal((plan.match(/^- \[x\]/gm) || []).length, 4);
+  assert.equal((plan.match(/^- \[x\]/gm) || []).length, 5);
   const state = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "state.json"), "utf8"));
-  assert.equal(state.runs.length, 6);
+  assert.equal(state.runs.length, 8);
   assert.equal(state.runs[0].tokens.output, 300, "usage is recorded per run");
   assert.equal(state.runs[0].costUsd, 0.01);
   const status = relay(dir, ["status"]).out;
-  assert.match(status, /Usage:\s+6 sessions, \$0\.06/);
-  assert.match(status, /4 done \/ 0 open/);
+  assert.match(status, /Usage:\s+8 sessions, \$0\.08/);
+  assert.match(status, /5 done \/ 0 open/);
 });
 
 test("review range excludes the review commit and starts after it", () => {
