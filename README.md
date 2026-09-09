@@ -1,4 +1,4 @@
-# claude-relay
+# agent-relay
 
 Run long, multi-step coding tasks as a **relay of short, fresh agent sessions** — plan → worker → review → acceptance — with all state kept in git. Quality does not decay over a long context, and a rate-limit pause is just a pause.
 
@@ -38,8 +38,8 @@ Works on macOS, Linux and Windows. No dependencies.
 ### As a Claude Code plugin (recommended)
 
 ```
-claude plugin marketplace add okshoptw/claude-relay
-claude plugin install relay@claude-relay
+claude plugin marketplace add Dennis-LW/agent-relay
+claude plugin install relay@agent-relay
 ```
 
 This gives you the `/relay` skill in every project.
@@ -49,8 +49,8 @@ This gives you the `/relay` skill in every project.
 Codex reads skills from `~/.codex/skills`. Clone the repo and copy or symlink `skills/relay` there:
 
 ```
-git clone https://github.com/okshoptw/claude-relay
-ln -s "$PWD/claude-relay/skills/relay" ~/.codex/skills/relay     # Windows: mklink /D
+git clone https://github.com/Dennis-LW/agent-relay
+ln -s "$PWD/agent-relay/skills/relay" ~/.codex/skills/relay     # Windows: mklink /D
 ```
 
 Then in a project: `relay init --agent codex` (or set `"agent": "codex"` in `.relay/config.json`). Sessions run as `codex exec --full-auto`.
@@ -66,7 +66,7 @@ Clone the repo and copy or symlink `skills/relay` into `~/.claude/skills/relay`.
 ### CLI only
 
 ```
-npm install -g github:okshoptw/claude-relay
+npm install -g github:Dennis-LW/agent-relay
 relay help
 ```
 

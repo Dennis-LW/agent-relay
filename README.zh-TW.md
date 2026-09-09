@@ -1,4 +1,4 @@
-# claude-relay
+# agent-relay
 
 把長時間、多步驟的開發任務，拆成一連串**短而乾淨的 agent session 接力**完成：規劃 → 實作 → 審查 → 驗收，所有狀態都放在 git 裡。品質不會因為 context 變長而衰退，打到用量上限也只是暫停，不是中斷。
 
@@ -38,8 +38,8 @@ PLAN.md ──► runner ──► 新 session：做 T1，驗證，commit，打�
 ### 以 Claude Code plugin 安裝（建議）
 
 ```
-claude plugin marketplace add okshoptw/claude-relay
-claude plugin install relay@claude-relay
+claude plugin marketplace add Dennis-LW/agent-relay
+claude plugin install relay@agent-relay
 ```
 
 之後每個專案都有 `/relay` 這個 skill 可用。
@@ -49,8 +49,8 @@ claude plugin install relay@claude-relay
 Codex 從 `~/.codex/skills` 讀取 skill。clone 此 repo 後把 `skills/relay` 複製或 symlink 過去：
 
 ```
-git clone https://github.com/okshoptw/claude-relay
-ln -s "$PWD/claude-relay/skills/relay" ~/.codex/skills/relay     # Windows 用 mklink /D
+git clone https://github.com/Dennis-LW/agent-relay
+ln -s "$PWD/agent-relay/skills/relay" ~/.codex/skills/relay     # Windows 用 mklink /D
 ```
 
 在專案裡執行 `relay init --agent codex`（或在 `.relay/config.json` 設 `"agent": "codex"`），session 會以 `codex exec --full-auto` 執行。
@@ -66,7 +66,7 @@ clone 此 repo，把 `skills/relay` 複製或 symlink 到 `~/.claude/skills/rela
 ### 只裝 CLI
 
 ```
-npm install -g github:okshoptw/claude-relay
+npm install -g github:Dennis-LW/agent-relay
 relay help
 ```
 

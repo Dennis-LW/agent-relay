@@ -1,9 +1,9 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "claude-relay",
+  "name": "agent-relay",
   "description": "Marketplace for the relay plugin: long tasks as a relay of short fresh agent sessions (Claude Code, Codex CLI, Gemini CLI or any CLI agent).",
   "owner": {
-    "name": "dennis"
+    "name": "Dennis-LW"
   },
   "plugins": [
     {
@@ -11,7 +11,7 @@
       "description": "Run long, multi-step coding tasks as a relay of short fresh agent sessions (Claude Code, Codex CLI, Gemini CLI or any CLI agent) with durable state in git.",
       "source": "./",
       "category": "productivity",
-      "homepage": "https://github.com/okshoptw/claude-relay"
+      "homepage": "https://github.com/Dennis-LW/agent-relay"
     }
   ],
   "metadata": {

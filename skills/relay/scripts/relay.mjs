@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// claude-relay — run long tasks as a relay of short, fresh agent sessions (Claude Code, Codex, Gemini or any CLI agent).
+// agent-relay — run long tasks as a relay of short, fresh agent sessions (Claude Code, Codex, Gemini or any CLI agent).
 // Zero dependencies. Node >= 18. Works on macOS, Linux and Windows.
 
 import { spawn, spawnSync } from "node:child_process";
@@ -617,7 +617,7 @@ async function handleFailure(proj, state, res, why = "") {
 // main
 // ---------------------------------------------------------------------------
 
-const HELP = `claude-relay — run long tasks as a relay of short, fresh agent sessions (Claude Code, Codex, Gemini or any CLI agent).
+const HELP = `agent-relay — run long tasks as a relay of short, fresh agent sessions (Claude Code, Codex, Gemini or any CLI agent).
 
 Usage:
   relay init [--plan <path>] [--verify "<cmd>"] [--agent claude|codex|gemini|custom]
