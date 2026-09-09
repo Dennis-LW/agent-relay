@@ -5,7 +5,8 @@
 // clean judge session to grade the resulting diff.
 //
 //   node bench/bench.mjs --yes [--plan bench/plans/todo-cli.md] [--arms relay,single]
-//                        [--runs 1] [--model claude-sonnet-5] [--judge-model claude-sonnet-5]
+//                        [--runs 1] [--model claude-sonnet-5] [--models worker=a,review=b,accept=c]
+//                        [--judge-model <model>]
 //                        [--out bench/results/<timestamp>] [--keep]
 //
 // This spends real tokens. Without --yes it only prints the estimate.
@@ -24,7 +25,9 @@ const planFile = path.resolve(args.plan || path.join(HERE, "plans", "todo-cli.md
 const arms = (args.arms || "relay,single").split(",").map((s) => s.trim());
 const runs = Number(args.runs || 1);
 const model = args.model || "claude-sonnet-5";
-const judgeModel = args["judge-model"] || model;
+// --models worker=a,review=b,accept=c overrides --model per role for the relay arm
+const roleModels = Object.fromEntries((args.models ? String(args.models).split(",") : []).map((kv) => kv.split("=").map((x) => x.trim())));
+const judgeModel = args["judge-model"] || roleModels.review || model;
 const outDir = path.resolve(args.out || path.join(HERE, "results", new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)));
 const timeoutMin = Number(args.timeout || 45);
 
@@ -40,7 +43,7 @@ const est = { relay: relaySessions * perSession, single: perSession * Math.max(2
 const judgeEst = 0.3 * arms.length * runs;
 const total = arms.reduce((s, a) => s + (est[a] || 0), 0) * runs + judgeEst;
 console.log(`plan: ${path.relative(ROOT, planFile)} (${tasks} tasks, verify: ${verify})`);
-console.log(`arms: ${arms.join(", ")} × ${runs} run(s), model ${model}, judge ${judgeModel}`);
+console.log(`arms: ${arms.join(", ")} × ${runs} run(s), model ${model}${Object.keys(roleModels).length ? ` (relay roles: ${Object.entries(roleModels).map(([k, v]) => `${k}=${v}`).join(" ")})` : ""}, judge ${judgeModel}`);
 console.log(`rough cost estimate: ~$${total.toFixed(0)} (${arms.map((a) => `${a} ≈ $${(est[a] || 0).toFixed(1)}/run`).join(", ")}, judge ≈ $${judgeEst.toFixed(1)})`);
 console.log(`note: on a subscription this is drawn from your usage limit instead of billed.`);
 if (!args.yes) {
@@ -102,7 +105,7 @@ function seedRepo(label) {
 function runRelay(repo) {
   fs.writeFileSync(
     path.join(repo, ".relay", "config.json"),
-    JSON.stringify({ agent: "claude", model, verify, reviewEvery: 3, acceptance: true, sessionTimeoutMinutes: timeoutMin, maxConsecutiveFailures: 2 }, null, 2),
+    JSON.stringify({ agent: "claude", model, models: roleModels, verify, reviewEvery: 3, acceptance: true, sessionTimeoutMinutes: timeoutMin, maxConsecutiveFailures: 2 }, null, 2),
   );
   const r = spawnSync(process.execPath, [RELAY, "run"], { cwd: repo, encoding: "utf8", env: cleanEnv(), stdio: ["ignore", "pipe", "inherit"] });
   fs.writeFileSync(path.join(outDir, `${path.basename(repo)}.runner.log`), r.stdout);
@@ -115,7 +118,7 @@ function runRelay(repo) {
     u.turns += x.turns || 0;
     for (const k of ["input", "cacheRead", "cacheWrite", "output"]) u[k] += x.tokens?.[k] || 0;
   }
-  u.byKind = state.runs.map((x) => ({ kind: x.kind, outcome: x.outcome, costUsd: x.costUsd, output: x.tokens?.output }));
+  u.byKind = state.runs.map((x) => ({ kind: x.kind, outcome: x.outcome, model: x.model, costUsd: x.costUsd, output: x.tokens?.output }));
   return u;
 }
 

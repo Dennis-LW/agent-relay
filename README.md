@@ -142,7 +142,10 @@ A task counts as done only if the tick mark changed **and** HEAD moved. A worker
 ## CLI
 
 ```
-relay init [--plan <path>] [--verify "<cmd>"] [--agent <name>]   create .relay/ in the current project
+relay init [--plan <path>] [--verify "<cmd>"] [--agent <name>]
+           [--model <name>] [--models plan=a,worker=b,review=c,accept=d]
+                                                create .relay/ in the current project
+relay plan "<description or spec path>"         write the plan with one headless session on the plan model
 relay status                                    progress, next task, runner state, handoff
 relay next                                      print the next open task
 relay run [--once] [--dry-run] [--detach]       run the loop (foreground by default)
@@ -157,9 +160,10 @@ relay stop                                      stop a background runner
 | `handoff` | `.relay/HANDOFF.md` | handoff note |
 | `verify` | `""` | command that must pass before a task is ticked |
 | `agent` | `claude` | `claude` \| `codex` \| `gemini` \| `custom` |
-| `command` | `[]` | for `custom`: argv; `{prompt}` is substituted, otherwise the prompt is piped to stdin |
+| `command` | `[]` | for `custom`: argv; `{prompt}` is substituted (otherwise the prompt is piped to stdin) and `{model}` gets the role's model (dropped with its flag when none is set) |
 | `claude` | `claude` | executable override for the chosen preset (e.g. a full path) |
 | `model` | `""` | model flag for sessions |
+| `models` | `{plan,worker,review,accept: ""}` | per-role model override; empty falls back to `model`, then the CLI default. See "Models per role" |
 | `permissionMode` | `acceptEdits` | Claude Code `--permission-mode` |
 | `allowedTools` | `[]` | Claude Code: extra `--allowedTools` rules. `git add/commit/status/diff/log`, `mkdir` and the verify command are always allowed, because headless sessions cannot ask |
 | `extraArgs` | `[]` | extra CLI args passed to every session |
@@ -171,6 +175,34 @@ relay stop                                      stop a background runner
 | `retryBaseMinutes` / `retryMaxMinutes` | `5` / `60` | rate-limit backoff |
 | `commitRequired` | `true` | require a new commit per task |
 | `notes` | `""` | free text appended to every prompt |
+
+## Models per role
+
+Planning, implementing and reviewing are different jobs, and on a subscription the model you pick is the main thing that decides how much of your limit a relay uses. `models` lets each role use its own model; any role left empty falls back to `model`, then to the CLI's default. Names are passed straight to the agent CLI (`--model` for Claude Code and Codex, `-m` for Gemini, `{model}` for custom), so use whatever names that CLI accepts.
+
+```json
+{ "models": { "plan": "claude-opus-5", "worker": "claude-sonnet-5", "review": "claude-opus-5", "accept": "claude-opus-5" } }
+```
+
+Same thing from the CLI: `relay init --models plan=claude-opus-5,worker=claude-sonnet-5,review=claude-opus-5,accept=claude-opus-5`.
+
+Typical splits:
+
+- **Claude Pro**: plan and review on Opus, workers on Sonnet. Workers are the bulk of the sessions; review and acceptance are one in four and are where a stronger model pays off.
+- **Claude Max**: plan and review on the strongest model you have, workers on Opus.
+- **Codex CLI**: `"agent": "codex"` plus e.g. `"models": {"plan": "<strong model>", "worker": "<fast model>"}`, whatever names `codex exec --model` accepts.
+- **Mixed CLIs** are not supported in one relay (one `agent` per project); use `custom` with a wrapper script if you need that.
+
+Where each role's model is used:
+
+| role | who runs it | model comes from |
+| --- | --- | --- |
+| plan | `/relay plan` inside your interactive session uses that session's model; `relay plan "<desc>"` runs a headless session on `models.plan` | interactive session, or `models.plan` |
+| worker | runner, one session per task | `models.worker` |
+| review | runner, every `reviewEvery` tasks | `models.review` |
+| accept | runner, when all tasks are ticked | `models.accept` |
+
+`relay status` shows the models in effect and the model each recorded session actually ran on.
 
 ## Permissions and safety
 

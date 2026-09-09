@@ -22,7 +22,11 @@ const DEFAULT_CONFIG = {
   agent: "claude", // claude | codex | gemini | custom
   command: [], // custom agent: argv, "{prompt}" is replaced by the prompt (or omit it to feed stdin)
   claude: "claude", // executable override for the selected preset
-  model: "",
+  model: "", // default model for every session kind (empty = the CLI's default)
+  // Per-role overrides so planning, implementation and review can use different
+  // models (e.g. a stronger model for plan/review, a cheaper one for workers).
+  // Empty string = fall back to `model`, then to the CLI default.
+  models: { plan: "", worker: "", review: "", accept: "" },
   permissionMode: "acceptEdits", // claude only
   // claude only: extra --allowedTools rules. Headless `-p` sessions cannot ask for
   // permission, so git and the verify command are always allowed (see claudeAllowedTools).
@@ -229,21 +233,28 @@ function baseVars(proj, plan) {
 // trigger the long exponential backoff. Matches the actual CLI/API error strings.
 const RATE_LIMIT_RE = /usage limit reached|rate_limit_error|rate.?limit(?:ed)?\s+(?:reached|exceeded|hit)|too many requests|\b429\b|overloaded_error/i;
 
+const ROLES = ["plan", "worker", "review", "accept"];
+const roleOf = (kind) => (kind.startsWith("worker-") ? "worker" : kind);
+function modelFor(cfg, role) {
+  return (cfg.models && cfg.models[role]) || cfg.model || "";
+}
+
 function runClaude(proj, prompt, kind, verify = "") {
   const { cfg, root, logsDir } = proj;
+  const model = modelFor(cfg, roleOf(kind));
   ensureDir(logsDir);
   const stamp = fileTs();
   const logBase = path.join(logsDir, `${stamp}-${kind}`);
   fs.writeFileSync(`${logBase}.prompt.md`, prompt);
 
-  const { exe, args, viaStdin } = agentCommand(cfg, prompt, verify);
+  const { exe, args, viaStdin } = agentCommand(cfg, prompt, verify, model);
 
   return new Promise((resolve) => {
     const child = spawn(exe, args, {
       cwd: root,
       shell: IS_WIN, // resolves .cmd shims on Windows
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...childEnv(), CLAUDE_RELAY: "1", CLAUDE_RELAY_KIND: kind, RELAY_KIND: kind },
+      env: { ...childEnv(), CLAUDE_RELAY: "1", CLAUDE_RELAY_KIND: kind, RELAY_KIND: kind, RELAY_ROLE: roleOf(kind), RELAY_MODEL: model },
     });
     let stdout = "";
     let stderr = "";
@@ -275,17 +286,17 @@ function runClaude(proj, prompt, kind, verify = "") {
       const usage = summariseUsage(parsed);
       fs.writeFileSync(
         `${logBase}.result.md`,
-        `# ${kind} — ${stamp}\n\nexit: ${code}  timedOut: ${timedOut}  rateLimited: ${rateLimited}\n` +
+        `# ${kind} — ${stamp}\n\nmodel: ${model || "(cli default)"}  exit: ${code}  timedOut: ${timedOut}  rateLimited: ${rateLimited}\n` +
           `usage: ${usage ? JSON.stringify(usage) : "(not reported)"}\n` +
           (denials.length ? `permission denials: ${denials.join(", ")}\n` : "") +
           `\n## stdout\n\n${resultText}\n\n## stderr\n\n${stderr}\n`,
       );
-      resolve({ code, timedOut, isError, rateLimited, resultText, stderr, costUsd: parsed?.total_cost_usd, usage, denials, logBase });
+      resolve({ code, timedOut, isError, rateLimited, resultText, stderr, costUsd: parsed?.total_cost_usd, usage, denials, logBase, model });
     });
     child.on("error", (e) => {
       clearTimeout(timer);
       fs.writeFileSync(`${logBase}.result.md`, `# ${kind} — spawn error\n\n${e.stack || e}\n`);
-      resolve({ code: -1, timedOut: false, isError: true, rateLimited: false, resultText: "", stderr: String(e), usage: null, denials: [], logBase });
+      resolve({ code: -1, timedOut: false, isError: true, rateLimited: false, resultText: "", stderr: String(e), usage: null, denials: [], logBase, model });
     });
   });
 }
@@ -293,9 +304,9 @@ function runClaude(proj, prompt, kind, verify = "") {
 // Build the argv for the configured agent CLI. Success is judged by side
 // effects (tick + commit), so any CLI that can edit files and run commands
 // unattended works here.
-function agentCommand(cfg, prompt, verify = "") {
+function agentCommand(cfg, prompt, verify = "", modelName = "") {
   const extra = cfg.extraArgs || [];
-  const model = cfg.model ? ["--model", cfg.model] : [];
+  const model = modelName ? ["--model", modelName] : [];
   switch (cfg.agent) {
     case "claude": {
       const allowed = claudeAllowedTools(cfg, verify);
@@ -325,13 +336,25 @@ function agentCommand(cfg, prompt, verify = "") {
       // Google Gemini CLI: -p prompt, --yolo auto-approves tool calls.
       return {
         exe: cfg.claude === "claude" ? "gemini" : cfg.claude,
-        args: ["--yolo", ...(cfg.model ? ["-m", cfg.model] : []), ...extra, "-p", prompt],
+        args: ["--yolo", ...(modelName ? ["-m", modelName] : []), ...extra, "-p", prompt],
         viaStdin: false,
       };
     case "custom": {
       if (!cfg.command?.length) throw new Error('agent "custom" needs "command": [exe, ...args] in .relay/config.json');
       const hasPlaceholder = cfg.command.some((a) => a.includes("{prompt}"));
-      const args = cfg.command.slice(1).map((a) => a.replace("{prompt}", prompt));
+      // {model} is substituted with the role's model. When no model is configured,
+      // an argument that is exactly "{model}" is dropped together with the flag
+      // right before it (so ["--model", "{model}"] disappears cleanly).
+      const src = cfg.command.slice(1);
+      const args = [];
+      for (let i = 0; i < src.length; i++) {
+        const a = src[i];
+        if (a === "{model}" && !modelName) {
+          if (args.length && args[args.length - 1].startsWith("-")) args.pop();
+          continue;
+        }
+        args.push(a.replace("{prompt}", prompt).replace("{model}", modelName));
+      }
       return { exe: cfg.command[0], args, viaStdin: !hasPlaceholder };
     }
     default:
@@ -435,6 +458,20 @@ async function reviewSession(proj, plan, state) {
   return { res, head: res.isError ? head : gitHead(proj.root) };
 }
 
+async function planSession(proj, description) {
+  const cfg = proj.cfg;
+  const rel = (p) => path.relative(proj.root, p).split(path.sep).join("/");
+  const vars = {
+    PLAN_PATH: rel(proj.planPath),
+    DESCRIPTION: description,
+    VERIFY: cfg.verify || "(not configured yet — find the project's test/build command and put it in the Verify section and in .relay/config.json)",
+    NOTES: cfg.notes || "",
+    PLATFORM: process.platform,
+    TEMPLATE: readText(path.join(SKILL_DIR, "templates", "PLAN.md")),
+  };
+  return runClaude(proj, render(loadPrompt("plan"), vars), "plan");
+}
+
 async function acceptanceSession(proj, plan) {
   const vars = baseVars(proj, plan);
   return runClaude(proj, render(loadPrompt("accept"), vars), "accept", vars.VERIFY);
@@ -454,6 +491,19 @@ function cmdInit(cwd, flags) {
   if (flags.plan) merged.plan = flags.plan;
   if (flags.verify) merged.verify = flags.verify;
   if (flags.agent) merged.agent = flags.agent;
+  if (flags.model) merged.model = flags.model;
+  if (flags.models) {
+    // --models plan=x,worker=y,review=z,accept=w
+    merged.models = { ...DEFAULT_CONFIG.models, ...(cfg.models || {}) };
+    for (const pair of String(flags.models).split(",")) {
+      const [k, v] = pair.split("=").map((x) => x.trim());
+      if (!ROLES.includes(k)) {
+        console.error(`--models: unknown role "${k}" (plan | worker | review | accept)`);
+        process.exit(1);
+      }
+      merged.models[k] = v || "";
+    }
+  }
   writeJson(cfgPath, merged);
   const tplDir = path.join(SKILL_DIR, "templates");
   const planPath = path.resolve(root, merged.plan);
@@ -473,7 +523,34 @@ function cmdInit(cwd, flags) {
   log(`handoff: ${merged.handoff}`);
   log(`verify:  ${merged.verify || "(not set)"}`);
   log(`agent:   ${merged.agent}`);
+  log(`models:  ${describeModels(merged)}`);
   log("Next: fill in the plan (or run /relay plan inside Claude Code), then `relay run`.");
+}
+
+function describeModels(cfg) {
+  return ROLES.map((r) => `${r}=${modelFor(cfg, r) || "(cli default)"}`).join("  ");
+}
+
+// `relay plan "<description>"`: one headless session, on the plan role's model,
+// writes the plan file. Nothing is committed; the user reviews it first.
+async function cmdPlan(proj, args) {
+  const description = args.join(" ").trim();
+  if (!description) {
+    console.error('usage: relay plan "<what to build, or path to a requirements doc>"');
+    process.exit(1);
+  }
+  log(`plan session — agent ${proj.cfg.agent}, model ${modelFor(proj.cfg, "plan") || "(cli default)"}`);
+  const res = await planSession(proj, description);
+  const plan = exists(proj.planPath) ? parsePlan(proj.planPath) : { tasks: [] };
+  if (res.isError || !plan.tasks.length) {
+    console.error(`plan session ${res.isError ? "failed" : "wrote no tasks"}; see ${path.relative(proj.root, res.logBase)}.result.md`);
+    if (res.denials?.length) console.error(`denied: ${res.denials.join(", ")}`);
+    process.exit(1);
+  }
+  const c = countTasks(plan);
+  log(`plan written: ${path.relative(proj.root, proj.planPath)} (${c.open} open tasks)${res.costUsd ? ` ($${res.costUsd.toFixed(2)})` : ""}`);
+  for (const t of plan.tasks) console.log(`  [${t.status === "done" ? "x" : " "}] ${t.id}: ${t.title}`);
+  log("review the plan, commit it, then `relay run`.");
 }
 
 function cmdStatus(proj) {
@@ -487,6 +564,7 @@ function cmdStatus(proj) {
   console.log(`Tasks:    ${c.done} done / ${c.open} open / ${c.skipped} skipped (total ${plan.tasks.length})`);
   console.log(`Next:     ${next ? `${next.id}: ${next.title}` : "(none — all tasks closed)"}`);
   console.log(`Runner:   ${alive ? `running (pid ${pid})` : "not running"}`);
+  console.log(`Agent:    ${proj.cfg.agent}  ${describeModels(proj.cfg)}`);
   console.log(`Failures: ${state.consecutiveFailures} consecutive; ${state.completedSinceReview} done since last review`);
   if (state.runs.length) {
     const tot = usageTotals(state.runs);
@@ -497,7 +575,7 @@ function cmdStatus(proj) {
     }
     console.log("Recent runs:");
     for (const r of state.runs.slice(-5)) {
-      const cost = r.costUsd != null ? `  $${r.costUsd.toFixed(2)}` : "";
+      const cost = (r.costUsd != null ? `  $${r.costUsd.toFixed(2)}` : "") + (r.model ? `  [${r.model}]` : "");
       const tok = r.tokens ? `  out ${fmtK(r.tokens.output)}${r.turns != null ? ` / ${r.turns} turns` : ""}` : "";
       console.log(`  ${r.at}  ${r.kind.padEnd(14)} ${r.outcome}${cost}${tok}${r.note ? "  " + r.note : ""}`);
     }
@@ -598,6 +676,7 @@ async function cmdRun(proj, flags) {
   }
 
   log(`runner start — agent ${cfg.agent}, plan ${path.relative(proj.root, proj.planPath)}, timeout ${cfg.sessionTimeoutMinutes}m/session`);
+  log(`models: ${describeModels(cfg)}`);
 
   for (;;) {
     const st = loadState(proj.statePath);
@@ -712,6 +791,7 @@ function record(state, kind, outcome, res, note) {
     outcome,
     note: note || "",
     log: res?.logBase ? path.basename(res.logBase) : "",
+    model: res?.model || "",
     costUsd: u?.costUsd ?? res?.costUsd ?? null,
     tokens: u ? { input: u.input, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, output: u.output } : null,
     turns: u?.turns ?? null,
@@ -744,7 +824,9 @@ const HELP = `agent-relay — run long tasks as a relay of short, fresh agent se
 
 Usage:
   relay init [--plan <path>] [--verify "<cmd>"] [--agent claude|codex|gemini|custom]
+             [--model <name>] [--models plan=a,worker=b,review=c,accept=d]
                                                   create .relay/ in the current project
+  relay plan "<description or path to a spec>"    write the plan with one headless session (plan role's model)
   relay status                                    progress, next task, runner state, handoff
   relay next                                      print the next open task
   relay run [--once] [--dry-run] [--detach]       run the relay loop (foreground by default)
@@ -765,6 +847,8 @@ async function main() {
   switch (cmd) {
     case "init":
       return cmdInit(cwd, flags);
+    case "plan":
+      return cmdPlan(loadProject(cwd), _.slice(1));
     case "status":
       return cmdStatus(loadProject(cwd));
     case "next":

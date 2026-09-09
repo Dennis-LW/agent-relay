@@ -142,7 +142,10 @@ node ~/.claude/skills/relay/scripts/relay.mjs status   # 若用 npm 安裝，直
 ## CLI
 
 ```
-relay init [--plan <path>] [--verify "<cmd>"] [--agent <name>]   在目前專案建立 .relay/
+relay init [--plan <path>] [--verify "<cmd>"] [--agent <name>]
+           [--model <name>] [--models plan=a,worker=b,review=c,accept=d]
+                                                在目前專案建立 .relay/
+relay plan "<描述或需求文件路徑>"                用 plan 角色的模型跑一個無頭 session 寫出計畫
 relay status                                    進度、下一個任務、runner 狀態、交接內容
 relay next                                      印出下一個未完成任務
 relay run [--once] [--dry-run] [--detach]       跑接力迴圈（預設前景）
@@ -157,9 +160,10 @@ relay stop                                      停止背景 runner
 | `handoff` | `.relay/HANDOFF.md` | 交接檔 |
 | `verify` | `""` | 打勾前必須通過的指令 |
 | `agent` | `claude` | `claude` \| `codex` \| `gemini` \| `custom` |
-| `command` | `[]` | `custom` 用：argv，`{prompt}` 會被代換，沒有則由 stdin 餵入 |
+| `command` | `[]` | `custom` 用：argv，`{prompt}` 會被代換（沒有則由 stdin 餵入），`{model}` 代換成該角色的模型（沒設模型時連同前面的旗標一起移除） |
 | `claude` | `claude` | 所選 preset 的執行檔覆寫（例如完整路徑） |
 | `model` | `""` | session 的模型參數 |
+| `models` | `{plan,worker,review,accept: ""}` | 各角色的模型覆寫；空字串退回 `model`，再退回 CLI 預設。見「各角色的模型」 |
 | `permissionMode` | `acceptEdits` | Claude Code 的 `--permission-mode` |
 | `allowedTools` | `[]` | Claude Code：額外的 `--allowedTools` 規則。`git add/commit/status/diff/log`、`mkdir` 與 verify 指令永遠放行，因為無人值守的 session 沒辦法問你 |
 | `extraArgs` | `[]` | 附加到每個 session 的額外 CLI 參數 |
@@ -171,6 +175,34 @@ relay stop                                      停止背景 runner
 | `retryBaseMinutes` / `retryMaxMinutes` | `5` / `60` | 限流退避時間 |
 | `commitRequired` | `true` | 每個任務都要有新 commit |
 | `notes` | `""` | 附加到每個 prompt 的自由文字 |
+
+## 各角色的模型
+
+規劃、實作、審查是不同性質的工作，而在訂閱方案上，用哪個模型幾乎就決定了一次接力吃掉多少額度。`models` 讓每個角色各用自己的模型；沒設的角色退回 `model`，再退回 CLI 預設。名稱原封不動傳給 agent CLI（Claude Code 與 Codex 是 `--model`，Gemini 是 `-m`，custom 用 `{model}`），所以填該 CLI 認得的名字即可。
+
+```json
+{ "models": { "plan": "claude-opus-5", "worker": "claude-sonnet-5", "review": "claude-opus-5", "accept": "claude-opus-5" } }
+```
+
+CLI 同義寫法：`relay init --models plan=claude-opus-5,worker=claude-sonnet-5,review=claude-opus-5,accept=claude-opus-5`。
+
+常見的配法：
+
+- **Claude Pro**：plan 與 review 用 Opus，worker 用 Sonnet。worker 是 session 的大宗；review 和 acceptance 四次才一次，正是強模型最划算的地方。
+- **Claude Max**：plan 與 review 用你手上最強的模型，worker 用 Opus。
+- **Codex CLI**：`"agent": "codex"` 加上例如 `"models": {"plan": "<強模型>", "worker": "<快模型>"}`，名稱以 `codex exec --model` 接受的為準。
+- 一次接力**不支援混用不同 CLI**（一個專案一個 `agent`）；真的需要就用 `custom` 包一層 wrapper script。
+
+各角色的模型在哪裡生效：
+
+| 角色 | 誰執行 | 模型來源 |
+| --- | --- | --- |
+| plan | 在互動 session 裡下 `/relay plan` 用的是該 session 的模型；`relay plan "<描述>"` 則用 `models.plan` 跑一個無頭 session | 互動 session，或 `models.plan` |
+| worker | runner，每個任務一個 session | `models.worker` |
+| review | runner，每完成 `reviewEvery` 項 | `models.review` |
+| accept | runner，所有任務打勾後 | `models.accept` |
+
+`relay status` 會顯示目前生效的模型，以及每筆 session 實際跑在哪個模型上。
 
 ## 權限與安全
 

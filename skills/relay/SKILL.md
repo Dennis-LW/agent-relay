@@ -26,17 +26,22 @@ This skill file is plain Agent Skills format, so the same instructions apply whe
 
 You produce the plan; the runner does not. Steps:
 
-1. If `.relay/config.json` does not exist, run `node RELAY init` (add `--verify "<cmd>"` if you already know the project's test command; add `--plan <path>` if the project already keeps a task file elsewhere, e.g. an OpenSpec `tasks.md`; add `--agent codex` / `--agent gemini` if the sessions should run on a different CLI than the one you are).
-2. Explore the codebase enough to write a realistic plan. Read CLAUDE.md / AGENTS.md and follow project conventions.
-3. Write the plan file following `templates/PLAN.md`. Rules that make relays work:
+1. If `.relay/config.json` does not exist, run `node RELAY init` (add `--verify "<cmd>"` if you already know the project's test command; add `--plan <path>` if the project already keeps a task file elsewhere, e.g. an OpenSpec `tasks.md`; add `--agent codex` / `--agent gemini` if the sessions should run on a different CLI than the one you are; add `--models plan=...,worker=...,review=...,accept=...` if the user wants different models per role, see below).
+2. If `models.plan` is set in the config and is not the model you are running on, do not write the plan yourself: run `node RELAY plan "<description>"`, which starts one headless session on that model, then read the resulting plan file and continue from step 5. Otherwise:
+3. Explore the codebase enough to write a realistic plan. Read CLAUDE.md / AGENTS.md and follow project conventions.
+4. Write the plan file following `templates/PLAN.md`. Rules that make relays work:
    - **Task size**: one task must be finishable and verifiable inside a single fresh session in well under the session timeout (default 45 min). If you cannot describe the diff in a few sentences, split it.
    - **Order = dependency order.** The runner always takes the first open task. Backend contract before frontend consumer, schema before code that uses it.
    - **Every task has an `Accept:` line** stating an observable condition (a test that passes, a command output, a file that exists). Vague tasks produce vague work.
    - **Constraints section** captures anything a fresh session would not know: branch to work on, style rules, files not to touch, conventions.
    - **Verify section** is one command that must pass after every task. If the project has none, make the first task create one.
    - Use ids `T1, T2, ...`. Review sessions append `R<n>`, acceptance appends `A<n>`; do not use those prefixes yourself.
-4. Set `verify` in `.relay/config.json` if not already set, and `notes` for any platform-specific instructions workers need (e.g. "activate the venv with ...").
-5. Show the user the task list and ask them to confirm before running. Suggest they commit the plan.
+5. Set `verify` in `.relay/config.json` if not already set, and `notes` for any platform-specific instructions workers need (e.g. "activate the venv with ...").
+6. Show the user the task list and ask them to confirm before running. Suggest they commit the plan.
+
+### Models per role
+
+`models` in the config gives each role (`plan`, `worker`, `review`, `accept`) its own model; empty falls back to `model`, then to the CLI default. Names go straight to the agent CLI, so use names it accepts. Typical: a strong model for plan/review/accept and a cheaper one for workers (e.g. Claude Pro: Opus for plan and review, Sonnet for workers). If the user says which models they want for planning vs execution, write them with `node RELAY init --models ...` and tell them `relay status` shows what is in effect.
 
 ### `/relay run`
 
@@ -74,9 +79,10 @@ If the environment variable `RELAY_KIND` (or `CLAUDE_RELAY`) is set, you were st
 | `handoff` | `.relay/HANDOFF.md` | handoff note path |
 | `verify` | `""` | command every session must pass before ticking |
 | `agent` | `claude` | `claude` \| `codex` \| `gemini` \| `custom` |
-| `command` | `[]` | for `custom`: argv; `{prompt}` is substituted, otherwise the prompt is piped to stdin |
+| `command` | `[]` | for `custom`: argv; `{prompt}` is substituted (otherwise the prompt is piped to stdin) and `{model}` gets the role's model (dropped with its flag when none is set) |
 | `claude` | `claude` | executable override for the chosen preset (e.g. a full path) |
 | `model` | `""` | model flag for sessions (empty = CLI default) |
+| `models` | `{plan,worker,review,accept: ""}` | per-role model override; empty falls back to `model`, then the CLI default. See "Models per role" |
 | `permissionMode` | `acceptEdits` | Claude Code `--permission-mode` |
 | `allowedTools` | `[]` | Claude Code: extra `--allowedTools` rules on top of the always-allowed git verbs, `mkdir` and the verify command (headless sessions cannot ask for permission) |
 | `extraArgs` | `[]` | extra CLI args passed to every session |

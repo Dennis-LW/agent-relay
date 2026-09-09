@@ -130,3 +130,50 @@ test("dry-run prints the worker prompt with the task body and does not touch git
   assert.match(r.out, /## Your task\n\nT1: first\n  - Accept: out-T1\.txt exists/);
   assert.equal(log()[0], "plan");
 });
+
+test("per-role models reach the agent: {model} in a custom command, RELAY_MODEL in env, model recorded per run", () => {
+  const { dir } = freshRepo(PLAN, {
+    model: "default-m",
+    models: { worker: "worker-m", review: "review-m" },
+    command: [process.execPath, FAKE, "--model", "{model}"],
+  });
+  const r = relay(dir, ["run"]);
+  assert.equal(r.code, 0, r.out);
+  const calls = fs.readFileSync(path.join(dir, ".relay", "fake-calls.log"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const byRole = Object.fromEntries(calls.map((c) => [c.role, c]));
+  assert.deepEqual(byRole.worker.argv, ["--model", "worker-m"]);
+  assert.equal(byRole.worker.model, "worker-m");
+  assert.deepEqual(byRole.review.argv, ["--model", "review-m"]);
+  assert.deepEqual(byRole.accept.argv, ["--model", "default-m"], "unset role falls back to `model`");
+  const state = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "state.json"), "utf8"));
+  assert.equal(state.runs.find((x) => x.kind === "review").model, "review-m");
+  assert.match(relay(dir, ["status"]).out, /worker=worker-m\s+review=review-m\s+accept=default-m/);
+});
+
+test("custom command: a bare {model} argument and its flag are dropped when no model is set", () => {
+  const { dir } = freshRepo(PLAN, { command: [process.execPath, FAKE, "--model", "{model}", "--x"] });
+  relay(dir, ["run", "--once"]);
+  const call = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "fake-calls.log"), "utf8").trim().split("\n")[0]);
+  assert.deepEqual(call.argv, ["--x"]);
+});
+
+test("relay init --models validates roles and writes them; relay plan runs one session on the plan model", () => {
+  const { dir } = freshRepo(PLAN);
+  const bad = relay(dir, ["init", "--models", "planner=x"]);
+  assert.equal(bad.code, 1);
+  assert.match(bad.out, /unknown role "planner"/);
+  const ok = relay(dir, ["init", "--models", "plan=plan-m,worker=w-m"]);
+  assert.equal(ok.code, 0, ok.out);
+  const cfg = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "config.json"), "utf8"));
+  assert.deepEqual(cfg.models, { plan: "plan-m", worker: "w-m", review: "", accept: "" });
+  assert.deepEqual(cfg.command, [process.execPath, FAKE], "init keeps existing config keys");
+
+  const r = relay(dir, ["plan", "build", "a", "widget"]);
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /plan written: .relay\/PLAN.md \(2 open tasks\)/);
+  assert.match(fs.readFileSync(path.join(dir, ".relay", "PLAN.md"), "utf8"), /^# Plan: build a widget/);
+  const call = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "fake-calls.log"), "utf8").trim().split("\n").pop());
+  assert.equal(call.kind, "plan");
+  assert.equal(call.model, "plan-m");
+  assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: dir, encoding: "utf8" }).includes("PLAN.md"), true, "plan is left uncommitted for review");
+});

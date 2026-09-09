@@ -12,8 +12,11 @@ import { execSync } from "node:child_process";
 
 const kind = process.env.RELAY_KIND || "";
 const mode = process.env.FAKE_MODE || "ok";
-fs.readFileSync(0, "utf8"); // consume prompt
+const promptText = fs.readFileSync(0, "utf8");
 const plan = ".relay/PLAN.md";
+// Record how we were invoked so tests can assert per-role models.
+fs.mkdirSync(".relay", { recursive: true });
+fs.appendFileSync(".relay/fake-calls.log", JSON.stringify({ kind, role: process.env.RELAY_ROLE, model: process.env.RELAY_MODEL, argv: process.argv.slice(2) }) + "\n");
 const sh = (c) => execSync(c, { stdio: "pipe" });
 const out = (o) => console.log(JSON.stringify(o));
 const usage = { input_tokens: 10, cache_read_input_tokens: 2000, cache_creation_input_tokens: 500, output_tokens: 300 };
@@ -26,7 +29,10 @@ if (mode === "denied")
 if (mode === "quota") return out({ result: "Task is to implement a per-user quota check; tests are broken so I stopped.", is_error: true });
 if (mode === "ratelimit") return out({ result: "Claude AI usage limit reached|1757400000", is_error: true });
 
-if (kind.startsWith("worker-")) {
+if (kind === "plan") {
+  const m = promptText.match(/## Request\n\n(.+)/);
+  fs.writeFileSync(plan, `# Plan: ${m ? m[1] : "?"}\n\n## Goal\nx\n\n## Verify\n\`true\`\n\n## Tasks\n- [ ] T1: one\n  - Accept: a\n- [ ] T2: two\n  - Accept: b\n`);
+} else if (kind.startsWith("worker-")) {
   const id = kind.slice("worker-".length);
   fs.writeFileSync(`out-${id}.txt`, `work for ${id}\n`);
   const s = fs.readFileSync(plan, "utf8");
