@@ -2,7 +2,9 @@
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "claude-relay",
   "description": "Marketplace for the relay plugin: long tasks as a relay of short fresh Claude Code sessions.",
-  "owner": { "name": "dennis" },
+  "owner": {
+    "name": "dennis"
+  },
   "plugins": [
     {
       "name": "relay",
@@ -11,5 +13,9 @@
       "category": "productivity",
       "homepage": "https://github.com/okshoptw/claude-relay"
     }
-  ]
+  ],
+  "metadata": {
+    "description": "Marketplace for the relay plugin: long tasks as a relay of short fresh Claude Code sessions.",
+    "version": "0.1.0"
+  }
 }
