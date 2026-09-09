@@ -634,6 +634,10 @@ async function planSession(proj, description) {
     NOTES: cfg.notes || "",
     PLATFORM: process.platform,
     TEMPLATE: readText(path.join(SKILL_DIR, "templates", "PLAN.md")),
+    PARALLEL:
+      cfg.parallel > 1
+        ? `The runner will execute up to ${cfg.parallel} tasks concurrently, each in its own git worktree, then merge. Mark independence explicitly: give every task that touches different files from its predecessors a \`- Depends: <ids>\` line (\`- Depends: none\` when it needs nothing). A task without a Depends line waits for every earlier task. Two tasks that edit the same file must NOT be independent, or their merge will conflict. Shape the plan so that the middle tasks can run side by side (e.g. separate modules first, wiring last).`
+        : "Tasks run one at a time in order; no Depends lines needed.",
   };
   return runClaude(proj, render(loadPrompt("plan"), vars), "plan");
 }
