@@ -27,6 +27,8 @@ if (mode === "noop") return out(okJson);
 if (mode === "denied")
   return out({ ...okJson, permission_denials: [{ tool_name: "Bash", tool_input: { command: "git add -A && git commit -m 'T1: x'" } }] });
 if (mode === "quota") return out({ result: "Task is to implement a per-user quota check; tests are broken so I stopped.", is_error: true });
+if (mode === "oldcli")
+  return out({ result: 'API Error: 400 {"type":"error","error":{"type":"invalid_request_error","message":"Claude Code 2.1.63 does not support this model; version 2.1.251 or newer is required.","details":{"error_code":"claude_code_version_too_old"}}}', is_error: true });
 if (mode === "ratelimit") return out({ result: "Claude AI usage limit reached|1757400000", is_error: true });
 
 if (kind === "plan") {

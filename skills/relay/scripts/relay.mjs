@@ -236,6 +236,9 @@ function baseVars(proj, plan) {
 
 // Deliberately narrow: a worker whose *task* is about quotas or rate limits must not
 // trigger the long exponential backoff. Matches the actual CLI/API error strings.
+// Errors that no retry will fix: wrong model name, CLI too old for the model, auth.
+const FATAL_RE = /claude_code_version_too_old|does not support this model|not_found_error|model.*(?:not found|does not exist|invalid)|authentication_error|invalid api key|not logged in/i;
+
 const RATE_LIMIT_RE = /usage limit reached|rate_limit_error|rate.?limit(?:ed)?\s+(?:reached|exceeded|hit)|too many requests|\b429\b|overloaded_error/i;
 
 const ROLES = ["plan", "worker", "review", "accept"];
@@ -291,6 +294,7 @@ function runClaude(proj, prompt, kind, verify = "") {
       const resultText = parsed?.result ?? stdout;
       const isError = code !== 0 || timedOut || parsed?.is_error === true;
       const rateLimited = RATE_LIMIT_RE.test(stderr) || (isError && RATE_LIMIT_RE.test(resultText.slice(0, 300)));
+      const fatal = isError && !rateLimited && FATAL_RE.test(resultText.slice(0, 600) + " " + stderr.slice(0, 600));
       const denials = (parsed?.permission_denials || []).map((d) => `${d.tool_name}(${d.tool_input?.command || JSON.stringify(d.tool_input || {})})`);
       const usage = summariseUsage(parsed);
       fs.writeFileSync(
@@ -300,7 +304,7 @@ function runClaude(proj, prompt, kind, verify = "") {
           (denials.length ? `permission denials: ${denials.join(", ")}\n` : "") +
           `\n## stdout\n\n${resultText}\n\n## stderr\n\n${stderr}\n`,
       );
-      resolve({ code, timedOut, isError, rateLimited, resultText, stderr, costUsd: parsed?.total_cost_usd, usage, denials, logBase, model, effort });
+      resolve({ code, timedOut, isError, rateLimited, fatal, resultText, stderr, costUsd: parsed?.total_cost_usd, usage, denials, logBase, model, effort });
     });
     child.on("error", (e) => {
       clearTimeout(timer);
@@ -727,6 +731,10 @@ async function cmdRun(proj, flags) {
       }
       writeJson(proj.statePath, st);
       if (res.isError) {
+        if (res.fatal) {
+          log(`review failed with a configuration error: ${res.resultText.trim().split("\n")[0].slice(0, 300)}`);
+          break;
+        }
         if (await handleFailure(proj, st, res)) break;
       }
       if (once) break;
@@ -748,6 +756,10 @@ async function cmdRun(proj, flags) {
       st.acceptanceRounds++;
       record(st, "accept", res.isError ? "error" : "ok", res);
       writeJson(proj.statePath, st);
+      if (res.isError && res.fatal) {
+        log(`acceptance failed with a configuration error: ${res.resultText.trim().split("\n")[0].slice(0, 300)}`);
+        break;
+      }
       if (res.isError && (await handleFailure(proj, st, res))) break;
       const after = parsePlan(proj.planPath);
       if (!nextOpenTask(after)) {
@@ -790,6 +802,14 @@ async function cmdRun(proj, flags) {
     } else {
       const why = res.timedOut ? "timeout" : res.rateLimited ? "rate-limited" : res.isError ? `exit ${res.code}` : !ticked ? "task not ticked" : "no commit";
       record(st, `worker ${task.id}`, "failed", res, why);
+      if (res.fatal) {
+        log(`task ${task.id} failed with a configuration error; retrying cannot help:`);
+        log(`  ${res.resultText.trim().split("\n")[0].slice(0, 300)}`);
+        log("check `model`/`models` and the agent CLI version, then `relay run` again");
+        st.consecutiveFailures++;
+        writeJson(proj.statePath, st);
+        break;
+      }
       if (res.denials?.length) {
         // Retrying cannot help: the same tool call will be denied again. Stop and
         // tell the user what to allow instead of burning sessions.

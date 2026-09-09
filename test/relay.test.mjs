@@ -200,3 +200,12 @@ test("per-role efforts: {effort} in a custom command, RELAY_EFFORT in env, fallb
   assert.equal(init.code, 1);
   assert.match(init.out, /--efforts: unknown role "bogus"/);
 });
+
+test("a CLI/model configuration error stops the runner at once instead of retrying", () => {
+  const { dir } = freshRepo(PLAN, { maxConsecutiveFailures: 5 });
+  const r = relay(dir, ["run"], { FAKE_MODE: "oldcli" });
+  assert.match(r.out, /configuration error; retrying cannot help/);
+  assert.match(r.out, /claude_code_version_too_old/);
+  const state = JSON.parse(fs.readFileSync(path.join(dir, ".relay", "state.json"), "utf8"));
+  assert.equal(state.runs.length, 1);
+});
