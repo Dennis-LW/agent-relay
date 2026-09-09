@@ -134,8 +134,9 @@ node ~/.claude/skills/relay/scripts/relay.mjs status   # 若用 npm 安裝，直
 | session | 時機 | 契約 |
 | --- | --- | --- |
 | worker | 每個未完成任務 | 只做這一項 → 跑 verify → commit → 打勾 `[x]` → 覆寫 HANDOFF |
-| review | 每完成 `reviewEvery` 項，以及每輪驗收前若有尚未審查的工作再審一次 | 用乾淨 context 讀 diff，寫 `.relay/reviews/*.md`，高/中嚴重度的發現補成 `R<n>` 任務；不改程式碼 |
+| review | 每完成 `reviewEvery` 項 | 用乾淨 context 讀 diff，寫 `.relay/reviews/*.md`，高/中嚴重度的發現補成 `R<n>` 任務；不改程式碼 |
 | acceptance | 沒有未完成任務時 | 真的逐項重跑 Accept 條件並對照 Goal，寫 `.relay/ACCEPTANCE.md`，補上 `A<n>` 後續任務；不改程式碼 |
+| recheck | 第 2 輪以後的驗收（follow-up 做完後） | 只重驗 follow-up 任務並審查它們的 diff；跑在 `recheck` 角色上，預設退回 worker 的模型；只有真的壞掉才補 `A<n>` |
 
 任務要同時滿足「勾選變了」**且**「HEAD 前進了」才算完成。做不完的 worker 會讓任務保持未勾選（或標成 `[-]` 表示卡住），並在 HANDOFF 說明原因。
 
@@ -145,8 +146,10 @@ node ~/.claude/skills/relay/scripts/relay.mjs status   # 若用 npm 安裝，直
 relay init [--plan <path>] [--verify "<cmd>"] [--agent <name>]
            [--model <name>] [--models plan=a,worker=b,review=c,accept=d]
            [--effort <level>] [--efforts plan=a,worker=b,review=c,accept=d]
+           [--profile light|standard|thorough]
                                                 在目前專案建立 .relay/
-relay plan "<描述或需求文件路徑>"                用 plan 角色的模型跑一個無頭 session 寫出計畫
+relay plan "<描述或需求文件路徑>"                用 plan 角色的模型跑一個無頭 session 寫出計畫與 CONTEXT.md
+relay add "<標題>" [--accept "<條件>"] [--after <id>]   插入任務，runner 跑著也可以
 relay status                                    進度、下一個任務、runner 狀態、交接內容
 relay next                                      印出下一個未完成任務
 relay run [--once] [--dry-run] [--detach]       跑接力迴圈（預設前景）
@@ -164,19 +167,48 @@ relay stop                                      停止背景 runner
 | `command` | `[]` | `custom` 用：argv，`{prompt}` 會被代換（沒有則由 stdin 餵入），`{model}` 代換成該角色的模型（沒設模型時連同前面的旗標一起移除） |
 | `claude` | `claude` | 所選 preset 的執行檔覆寫（例如完整路徑） |
 | `model` | `""` | session 的模型參數 |
-| `models` | `{plan,worker,review,accept: ""}` | 各角色的模型覆寫；空字串退回 `model`，再退回 CLI 預設。見「各角色的模型」 |
+| `models` | `{plan,worker,review,accept,recheck: ""}` | 各角色的模型覆寫；空字串退回 `model`，再退回 CLI 預設（`recheck` 退回 `worker`）。見「各角色的模型」 |
 | `effort` / `efforts` | `""` / 各角色 `""` | 推理 effort，退回規則同 `model`/`models`。Claude Code 用 `--effort`（`low`、`medium`、`high`）；Codex 用 `-c model_reasoning_effort=<level>`；custom 用 `{effort}`；Gemini 沒有對應選項 |
 | `permissionMode` | `acceptEdits` | Claude Code 的 `--permission-mode` |
 | `allowedTools` | `[]` | Claude Code：額外的 `--allowedTools` 規則。`git add/commit/status/diff/log`、`mkdir` 與 verify 指令永遠放行，因為無人值守的 session 沒辦法問你 |
 | `extraArgs` | `[]` | 附加到每個 session 的額外 CLI 參數 |
 | `sessionTimeoutMinutes` | `45` | 每個 session 的強制逾時 |
-| `reviewEvery` | `3` | 每完成幾項就審查一次（0 = 不審）；驗收前若有未審查的工作也會先審 |
+| `parallel` | `1` | 同時最多幾個 worker；>1 時 `Depends:` 已滿足的任務會在各自的 git worktree 平行跑（見「平行 worker」） |
+| `profile` | `standard` | `light` \| `standard` \| `thorough`；由 `relay init --profile` 設定，只是下面三個鍵的預設組合 |
+| `context` | `.relay/CONTEXT.md` | plan session 寫的專案簡介，注入每個 prompt |
+| `reviewEvery` | `3` | 每完成幾項就審查一次（0 = 不審）；最後還沒審的 commit 會在 acceptance session 裡一起審 |
 | `acceptance` | `true` | 最後是否跑驗收 session |
-| `maxAcceptanceRounds` | `2` | 驗收 → 補任務的迴圈上限 |
+| `maxAcceptanceRounds` | `2` | 驗收 → 補任務的迴圈上限；第 2 輪起是 recheck |
 | `maxConsecutiveFailures` | `5` | 連續失敗幾次就放棄 |
 | `retryBaseMinutes` / `retryMaxMinutes` | `5` / `60` | 限流退避時間 |
 | `commitRequired` | `true` | 每個任務都要有新 commit |
 | `notes` | `""` | 附加到每個 prompt 的自由文字 |
+
+## 一次接力的成本結構
+
+每個 session 都是乾淨 context，所以每個都會重新讀專案。三件事讓這件事變便宜：
+
+- **`.relay/CONTEXT.md`**：plan session 會寫一頁專案簡介（結構、指令、慣例、關鍵檔案），之後每個 prompt 都會帶上，worker 從它開始而不是自己探索；worker 也被要求先讀任務的 `Files:`。
+- **最後只做一次乾淨 context 的檢查，不是三次。** 任務清單空了的時候，還沒審過的 commit 會在 acceptance session **裡面**一起審（它也會拿到既有的 review 報告，不會重查）。之後的輪次是 `recheck`：只重驗 follow-up 任務，跑在較便宜的 recheck/worker 模型上。
+- **Profile。** `relay init --profile light`（中途不審，最後一次合併的 review 加驗收，適合幾個任務的小計畫）、`standard`（每 3 項審一次）、`thorough`（每項都審）。設定檔裡的鍵之後仍可自行改。
+
+## 執行中修改計畫
+
+runner 每個迴圈開始都會重新讀計畫檔，所以 `relay run` 跑著的時候可以直接編輯：插任務、改 `Accept:`、把任務標成 `[-]` 跳過，從下一個任務開始生效。`relay add "<標題>" --accept "<條件>" [--after T2]` 幫你插入並只 commit 計畫檔；只有要放棄進行中的 session 才需要 `relay stop` 再 `relay run`。
+
+## 平行 worker
+
+`"parallel": 2`（或更多）會同時跑彼此獨立的任務，每個在自己的 git worktree 和 `relay/<id>` 分支上，完成後依計畫順序合併回來。獨立性由計畫宣告，沒宣告的不會一起跑：
+
+```markdown
+- [ ] T2: API client
+  - Accept: ...
+  - Depends: none
+- [ ] T4: 把 client 接進 UI
+  - Depends: T2, T3
+```
+
+沒有 `Depends:` 的任務等於依賴它前面所有任務（也就是原本的序列行為）。計畫檔和交接檔的衝突會自動解（重新打勾、交接取最新）；其他檔案的衝突會放棄該次合併，之後讓那個任務單獨重跑。一批合併完會再跑一次 verify，若各自通過但合起來失敗，會補一個 `M<n>` 修正任務。平行省的是時間不是 token：訂閱方案會更快碰到用量視窗。
 
 ## 各角色的模型
 
@@ -201,6 +233,7 @@ CLI 同義寫法：`relay init --models plan=claude-opus-5,worker=claude-sonnet-
 | --- | --- | --- |
 | plan | 在互動 session 裡下 `/relay plan` 用的是該 session 的模型；`relay plan "<描述>"` 則用 `models.plan` 跑一個無頭 session | 互動 session，或 `models.plan` |
 | worker | runner，每個任務一個 session | `models.worker` |
+| recheck | runner，第 2 輪以後的驗收 | `models.recheck`，退回 `models.worker` |
 | review | runner，每完成 `reviewEvery` 項 | `models.review` |
 | accept | runner，所有任務打勾後 | `models.accept` |
 

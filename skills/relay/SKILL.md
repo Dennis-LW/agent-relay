@@ -1,6 +1,6 @@
 ---
 name: relay
-description: Run a long, multi-step coding task as a relay of short fresh agent sessions (plan → worker sessions → review → acceptance) with durable state in git. Works with Claude Code, OpenAI Codex CLI, Gemini CLI or any CLI agent. Use when the user wants to hand over a big job (build a feature/system end to end, large refactor, long migration) to run unattended, wants to avoid long-session quality decay, or wants work to resume automatically after rate limits. Subcommands - /relay plan, /relay run, /relay status, /relay stop.
+description: Run a long, multi-step coding task as a relay of short fresh agent sessions (plan → worker sessions → review → acceptance) with durable state in git. Works with Claude Code, OpenAI Codex CLI, Gemini CLI or any CLI agent. Use when the user wants to hand over a big job (build a feature/system end to end, large refactor, long migration) to run unattended, wants to avoid long-session quality decay, or wants work to resume automatically after rate limits. Subcommands - /relay plan, /relay run, /relay add, /relay status, /relay stop.
 ---
 
 # Relay
@@ -29,13 +29,15 @@ You produce the plan; the runner does not. Steps:
 1. If `.relay/config.json` does not exist, run `node RELAY init` (add `--verify "<cmd>"` if you already know the project's test command; add `--plan <path>` if the project already keeps a task file elsewhere, e.g. an OpenSpec `tasks.md`; add `--agent codex` / `--agent gemini` if the sessions should run on a different CLI than the one you are; add `--models plan=...,worker=...,review=...,accept=...` if the user wants different models per role, see below).
 2. If `models.plan` is set in the config and is not the model you are running on, do not write the plan yourself: run `node RELAY plan "<description>"`, which starts one headless session on that model, then read the resulting plan file and continue from step 5. Otherwise:
 3. Explore the codebase enough to write a realistic plan. Read CLAUDE.md / AGENTS.md and follow project conventions.
-4. Write the plan file following `templates/PLAN.md`. Rules that make relays work:
+4. Write the plan file following `templates/PLAN.md`, and write `.relay/CONTEXT.md`: a one-page brief (layout, runtime, test/build commands, conventions, key files) that every later session receives verbatim so it does not re-explore. Rules that make relays work:
    - **Task size**: one task must be finishable and verifiable inside a single fresh session in well under the session timeout (default 45 min). If you cannot describe the diff in a few sentences, split it.
    - **Order = dependency order.** The runner always takes the first open task. Backend contract before frontend consumer, schema before code that uses it.
    - **Every task has an `Accept:` line** stating an observable condition (a test that passes, a command output, a file that exists). Vague tasks produce vague work.
    - **Constraints section** captures anything a fresh session would not know: branch to work on, style rules, files not to touch, conventions.
    - **Verify section** is one command that must pass after every task. If the project has none, make the first task create one.
-   - Use ids `T1, T2, ...`. Review sessions append `R<n>`, acceptance appends `A<n>`; do not use those prefixes yourself.
+   - Use ids `T1, T2, ...`. Review sessions append `R<n>`, acceptance appends `A<n>`, post-merge fixes `M<n>`; do not use those prefixes yourself.
+   - **Pick a profile**: `--profile light` for up to ~5 tasks (one combined review+acceptance at the end), `standard` otherwise, `thorough` for risky changes.
+   - If the user wants tasks to run in parallel, set `"parallel": 2` (or more) in the config and add `- Depends: none` / `- Depends: T1, T2` lines to tasks that are genuinely independent (different files). Tasks without a `Depends:` line stay sequential.
 5. Set `verify` in `.relay/config.json` if not already set, and `notes` for any platform-specific instructions workers need (e.g. "activate the venv with ...").
 6. Show the user the task list and ask them to confirm before running. Suggest they commit the plan.
 
@@ -58,6 +60,10 @@ Foreground (`node RELAY run`) is fine when the user wants to watch, and `--once`
 - Tell the user how to follow progress: `node RELAY status`, `.relay/runner.out`, `.relay/logs/`.
 
 The runner keeps going through rate limits: a limited session counts as a failure, it waits with exponential backoff (5 min → 60 min cap) and tries again. It gives up after `maxConsecutiveFailures` in a row; `relay run` again resumes from the plan.
+
+### `/relay add <title>`
+
+Run `node RELAY add "<title>" --accept "<observable condition>"` (add `--after <id>` to insert mid-list). This works while the runner is running: the plan is re-read before every task. Plain edits to the plan file work too; tell the user that.
 
 ### `/relay status`
 
@@ -82,13 +88,16 @@ If the environment variable `RELAY_KIND` (or `CLAUDE_RELAY`) is set, you were st
 | `command` | `[]` | for `custom`: argv; `{prompt}` is substituted (otherwise the prompt is piped to stdin) and `{model}` gets the role's model (dropped with its flag when none is set) |
 | `claude` | `claude` | executable override for the chosen preset (e.g. a full path) |
 | `model` | `""` | model flag for sessions (empty = CLI default) |
-| `models` | `{plan,worker,review,accept: ""}` | per-role model override; empty falls back to `model`, then the CLI default. See "Models per role" |
+| `models` | `{plan,worker,review,accept,recheck: ""}` | per-role model override; empty falls back to `model`, then the CLI default (`recheck` → `worker`) |
 | `effort` / `efforts` | `""` / per role `""` | reasoning effort, same fallback as `model`/`models`. Claude Code `--effort` (`low`, `medium`, `high`); Codex `-c model_reasoning_effort=<level>`; custom `{effort}`; Gemini has no equivalent |
 | `permissionMode` | `acceptEdits` | Claude Code `--permission-mode` |
 | `allowedTools` | `[]` | Claude Code: extra `--allowedTools` rules on top of the always-allowed git verbs, `mkdir` and the verify command (headless sessions cannot ask for permission) |
 | `extraArgs` | `[]` | extra CLI args passed to every session |
 | `sessionTimeoutMinutes` | `45` | hard kill per session |
-| `reviewEvery` | `3` | review session after this many completed tasks (0 = never); also once before each acceptance round when unreviewed work exists |
+| `parallel` | `1` | >1 runs tasks whose `Depends:` are satisfied concurrently in git worktrees; tasks without a `Depends:` line depend on all earlier tasks |
+| `profile` | `standard` | `light` (no mid-run reviews, one combined review+acceptance) \| `standard` \| `thorough` (review every task); set with `init --profile` |
+| `context` | `.relay/CONTEXT.md` | project brief written by the plan session, injected into every prompt |
+| `reviewEvery` | `3` | review session after this many completed tasks (0 = never); commits still unreviewed at the end are reviewed inside the acceptance session |
 | `acceptance` | `true` | run the acceptance session when all tasks are ticked |
 | `maxAcceptanceRounds` | `2` | acceptance may add follow-ups; cap the loop |
 | `maxConsecutiveFailures` | `5` | give up after this many failures in a row |

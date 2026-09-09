@@ -16,7 +16,9 @@ const promptText = fs.readFileSync(0, "utf8");
 const plan = ".relay/PLAN.md";
 // Record how we were invoked so tests can assert per-role models.
 fs.mkdirSync(".relay", { recursive: true });
-fs.appendFileSync(".relay/fake-calls.log", JSON.stringify({ kind, role: process.env.RELAY_ROLE, model: process.env.RELAY_MODEL, effort: process.env.RELAY_EFFORT, argv: process.argv.slice(2) }) + "\n");
+// In parallel mode each worker runs in its own worktree, so log to the shared file via FAKE_LOG.
+const callLog = process.env.FAKE_LOG || ".relay/fake-calls.log";
+fs.appendFileSync(callLog, JSON.stringify({ kind, role: process.env.RELAY_ROLE, model: process.env.RELAY_MODEL, effort: process.env.RELAY_EFFORT, argv: process.argv.slice(2), cwd: process.cwd(), at: Date.now() }) + "\n");
 const sh = (c) => execSync(c, { stdio: "pipe" });
 const out = (o) => console.log(JSON.stringify(o));
 const usage = { input_tokens: 10, cache_read_input_tokens: 2000, cache_creation_input_tokens: 500, output_tokens: 300 };
@@ -38,6 +40,8 @@ if (kind === "plan") {
 } else if (kind.startsWith("worker-")) {
   const id = kind.slice("worker-".length);
   fs.writeFileSync(`out-${id}.txt`, `work for ${id}\n`);
+  if (process.env.FAKE_SHARED) fs.writeFileSync("shared.txt", `${id}\n`); // provoke a real merge conflict
+  if (process.env.FAKE_SLEEP_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.FAKE_SLEEP_MS));
   const s = fs.readFileSync(plan, "utf8");
   const re = new RegExp(`^- \\[ \\] (${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[:.].*)$`, "m");
   fs.writeFileSync(plan, s.replace(re, "- [x] $1"));

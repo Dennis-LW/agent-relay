@@ -134,8 +134,9 @@ Any markdown file with `- [ ]` items under a heading containing "Tasks" works, s
 | session | when | contract |
 | --- | --- | --- |
 | worker | for each open task | do only this task → run verify → commit → tick `[x]` → overwrite HANDOFF |
-| review | every `reviewEvery` completed tasks, and once before each acceptance round when unreviewed work exists | read the diff with a clean context, write `.relay/reviews/*.md`, append `R<n>` fix tasks for high/medium findings; never edits code |
-| acceptance | when no open tasks remain | re-check every Accept line and the Goal for real, write `.relay/ACCEPTANCE.md`, append `A<n>` follow-ups; never edits code |
+| review | every `reviewEvery` completed tasks | read the diff with a clean context, write `.relay/reviews/*.md`, append `R<n>` fix tasks for high/medium findings; never edits code |
+| acceptance | when no open tasks remain (round 1) | re-check every Accept line and the Goal for real, write `.relay/ACCEPTANCE.md`, append `A<n>` follow-ups; never edits code |
+| recheck | acceptance rounds 2+ (after follow-up tasks are done) | re-verifies only the follow-up tasks and reviews their diff; runs on the `recheck` role, which defaults to the worker model; appends `A<n>` only for real breakage |
 
 A task counts as done only if the tick mark changed **and** HEAD moved. A worker that cannot finish leaves the task open (or marks it `[-]` blocked) and explains why in HANDOFF.
 
@@ -145,8 +146,10 @@ A task counts as done only if the tick mark changed **and** HEAD moved. A worker
 relay init [--plan <path>] [--verify "<cmd>"] [--agent <name>]
            [--model <name>] [--models plan=a,worker=b,review=c,accept=d]
            [--effort <level>] [--efforts plan=a,worker=b,review=c,accept=d]
+           [--profile light|standard|thorough]
                                                 create .relay/ in the current project
-relay plan "<description or spec path>"         write the plan with one headless session on the plan model
+relay plan "<description or spec path>"         write the plan (and CONTEXT.md) with one headless session on the plan model
+relay add "<title>" [--accept "<cond>"] [--after <id>]   insert a task, also while the runner is running
 relay status                                    progress, next task, runner state, handoff
 relay next                                      print the next open task
 relay run [--once] [--dry-run] [--detach]       run the loop (foreground by default)
@@ -164,19 +167,48 @@ relay stop                                      stop a background runner
 | `command` | `[]` | for `custom`: argv; `{prompt}` is substituted (otherwise the prompt is piped to stdin) and `{model}` gets the role's model (dropped with its flag when none is set) |
 | `claude` | `claude` | executable override for the chosen preset (e.g. a full path) |
 | `model` | `""` | model flag for sessions |
-| `models` | `{plan,worker,review,accept: ""}` | per-role model override; empty falls back to `model`, then the CLI default. See "Models per role" |
+| `models` | `{plan,worker,review,accept,recheck: ""}` | per-role model override; empty falls back to `model`, then the CLI default (`recheck` falls back to `worker`). See "Models per role" |
 | `effort` / `efforts` | `""` / per role `""` | reasoning effort, same fallback as `model`/`models`. Claude Code `--effort` (`low`, `medium`, `high`); Codex `-c model_reasoning_effort=<level>`; custom `{effort}`; Gemini has no equivalent |
 | `permissionMode` | `acceptEdits` | Claude Code `--permission-mode` |
 | `allowedTools` | `[]` | Claude Code: extra `--allowedTools` rules. `git add/commit/status/diff/log`, `mkdir` and the verify command are always allowed, because headless sessions cannot ask |
 | `extraArgs` | `[]` | extra CLI args passed to every session |
 | `sessionTimeoutMinutes` | `45` | hard kill per session |
-| `reviewEvery` | `3` | review after this many tasks (0 = never); a review also runs before acceptance when unreviewed work exists |
+| `parallel` | `1` | max concurrent workers; >1 runs tasks with satisfied `Depends:` in separate git worktrees (see "Parallel workers") |
+| `profile` | `standard` | `light` \| `standard` \| `thorough`; set by `relay init --profile`, just presets for the three keys below |
+| `context` | `.relay/CONTEXT.md` | project brief written by the plan session and injected into every prompt |
+| `reviewEvery` | `3` | review after this many tasks (0 = never); commits still unreviewed at the end are reviewed inside the acceptance session |
 | `acceptance` | `true` | run the acceptance session at the end |
 | `maxAcceptanceRounds` | `2` | cap on acceptance → follow-up loops |
 | `maxConsecutiveFailures` | `5` | give up after this many failures in a row |
 | `retryBaseMinutes` / `retryMaxMinutes` | `5` / `60` | rate-limit backoff |
 | `commitRequired` | `true` | require a new commit per task |
 | `notes` | `""` | free text appended to every prompt |
+
+## Cost profile of a relay
+
+Every session is a fresh context, so each one re-reads the project. Three things keep that cheap:
+
+- **`.relay/CONTEXT.md`**: the plan session writes a one-page project brief (layout, commands, conventions, key files) that is injected into every later prompt, so workers start from it instead of exploring. Workers are also told to start from the task's `Files:` line.
+- **One clean-context check at the end, not three.** When the task list empties, unreviewed commits are reviewed *inside* the acceptance session (it gets the existing review reports too, so nothing is re-investigated). Later rounds are a `recheck`: only the follow-up tasks are re-verified, on the cheaper recheck/worker model.
+- **Profiles.** `relay init --profile light` (no mid-run reviews; one combined review+acceptance at the end, for plans of a handful of tasks), `standard` (review every 3 tasks) or `thorough` (review after every task). The keys stay editable in the config.
+
+## Changing the plan while it runs
+
+The runner re-reads the plan file at the start of every loop, so you can edit it while `relay run` is going: insert tasks, sharpen an `Accept:` line, mark a task `[-]` to skip it. The change applies from the next task on. `relay add "<title>" --accept "<condition>" [--after T2]` does the insert and commits just the plan file; `relay stop` and `relay run` are only needed to abandon the session in flight.
+
+## Parallel workers
+
+`"parallel": 2` (or more) runs independent tasks at the same time, each in its own git worktree on a `relay/<id>` branch, and merges them back in plan order. Independence is declared in the plan, so nothing runs together unless you say so:
+
+```markdown
+- [ ] T2: API client
+  - Accept: ...
+  - Depends: none
+- [ ] T4: wire client into UI
+  - Depends: T2, T3
+```
+
+A task without a `Depends:` line depends on every task before it (the sequential default). Conflicts in the plan/handoff files are resolved automatically (the tick is re-applied, the newest handoff wins); a conflict in any other file aborts that merge and the task is re-run alone afterwards. After a batch merges, the verify command runs once more; if the combination fails where each task passed, an `M<n>` fix task is added. Parallelism saves wall time, not tokens: on a subscription you reach the usage window faster.
 
 ## Models per role
 
@@ -201,6 +233,7 @@ Where each role's model is used:
 | --- | --- | --- |
 | plan | `/relay plan` inside your interactive session uses that session's model; `relay plan "<desc>"` runs a headless session on `models.plan` | interactive session, or `models.plan` |
 | worker | runner, one session per task | `models.worker` |
+| recheck | runner, acceptance rounds 2+ | `models.recheck`, falling back to `models.worker` |
 | review | runner, every `reviewEvery` tasks | `models.review` |
 | accept | runner, when all tasks are ticked | `models.accept` |
 

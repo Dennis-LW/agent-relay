@@ -277,3 +277,55 @@ test("relay init --profile applies review cadence and is reported", () => {
   relay(dir, ["init", "--profile", "thorough"]);
   assert.equal(JSON.parse(fs.readFileSync(path.join(dir, ".relay", "config.json"), "utf8")).reviewEvery, 1);
 });
+
+const PAR_PLAN = `# Plan: parallel
+
+## Verify
+\`true\`
+
+## Tasks
+- [ ] T1: base
+- [ ] T2: independent
+  - Depends: none
+  - Accept: out-T2.txt exists
+- [ ] T3: needs both
+  - Accept: out-T3.txt exists
+  - Depends: T1, T2
+`;
+
+test("parallel: independent tasks run concurrently in worktrees, adjacent plan ticks auto-merge, dependents wait", () => {
+  const { dir, log } = freshRepo(PAR_PLAN, { parallel: 2, reviewEvery: 0, acceptance: false });
+  const logFile = path.join(dir, "calls.log");
+  const r = relay(dir, ["run"], { FAKE_LOG: logFile, FAKE_SLEEP_MS: "400" });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /parallel batch: T1, T2/);
+  const calls = fs.readFileSync(logFile, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const t1 = calls.find((c) => c.kind === "worker-T1");
+  const t2 = calls.find((c) => c.kind === "worker-T2");
+  const t3 = calls.find((c) => c.kind === "worker-T3");
+  const real = (p) => fs.realpathSync(p);
+  assert.notEqual(t1.cwd, t2.cwd, "each worker gets its own worktree");
+  assert.ok(/relay-wt-/.test(t1.cwd) && /relay-wt-/.test(t2.cwd), "workers ran in temporary worktrees");
+  assert.ok(Math.abs(t1.at - t2.at) < 350, `T1 and T2 started together (${Math.abs(t1.at - t2.at)}ms apart)`);
+  assert.ok(t3.at > Math.max(t1.at, t2.at) + 350, "T3 waited for both");
+  assert.equal(real(t3.cwd), real(dir), "a lone runnable task runs sequentially in the main tree");
+  for (const id of ["T1", "T2", "T3"]) assert.equal(fs.existsSync(path.join(dir, `out-${id}.txt`)), true, `${id} merged`);
+  assert.match(relay(dir, ["status"]).out, /3 done \/ 0 open/);
+  assert.match(r.out, /task T2 done.*auto-resolved .*\.relay\/PLAN\.md/, "adjacent tick lines conflict and are resolved");
+  const planAfter = fs.readFileSync(path.join(dir, ".relay", "PLAN.md"), "utf8");
+  assert.equal((planAfter.match(/^- \[x\]/gm) || []).length, 3, "all three ticks survive the auto-merge");
+  assert.doesNotMatch(planAfter, /<<<<<<<|>>>>>>>/);
+  assert.equal(execFileSync("git", ["worktree", "list"], { cwd: dir, encoding: "utf8" }).trim().split("\n").length, 1, "worktrees cleaned up");
+  assert.doesNotMatch(execFileSync("git", ["branch"], { cwd: dir, encoding: "utf8" }), /relay\//);
+  void log;
+});
+
+test("parallel: a real file conflict aborts that merge and the task is retried alone", () => {
+  const { dir } = freshRepo(PAR_PLAN, { parallel: 2, reviewEvery: 0, acceptance: false });
+  const r = relay(dir, ["run"], { FAKE_SHARED: "1", FAKE_LOG: path.join(os.tmpdir(), `relay-calls-${process.pid}.log`) });
+  assert.equal(r.code, 0, r.out);
+  assert.match(r.out, /task T2: merge conflict in shared.txt; will retry alone/);
+  assert.match(r.out, /\] task T2: independent\n/, "T2 re-run sequentially afterwards");
+  assert.match(relay(dir, ["status"]).out, /3 done \/ 0 open/);
+  assert.equal(fs.readFileSync(path.join(dir, "shared.txt"), "utf8").trim(), "T3");
+});

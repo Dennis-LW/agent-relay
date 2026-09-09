@@ -4,6 +4,7 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -41,6 +42,10 @@ const DEFAULT_CONFIG = {
   allowedTools: [],
   extraArgs: [],
   sessionTimeoutMinutes: 45,
+  // Max worker sessions at once. >1 runs independent tasks in separate git
+  // worktrees and merges them back; tasks declare independence with a
+  // `- Depends: T1, T2` / `- Depends: none` line (no line = depends on every earlier task).
+  parallel: 1,
   profile: "standard", // light | standard | thorough — see PROFILES
   reviewEvery: 3,
   acceptance: true,
@@ -140,6 +145,7 @@ function loadState(p) {
     acceptanceRounds: 0,
     lastReviewHead: "",
     acceptedTaskCount: 0,
+    conflicted: [],
     runs: [],
     stopped: false,
   });
@@ -185,10 +191,13 @@ function parsePlan(planPath) {
         title: idm ? idm[2] : title,
         raw: title,
         body: [],
+        deps: null, // null = implicit: every earlier task
       };
       tasks.push(cur);
     } else if (cur && /^\s+\S/.test(line)) {
       cur.body.push(line.trim());
+      const d = line.trim().match(/^-?\s*Depends:\s*(.*)$/i);
+      if (d) cur.deps = /^(none|-|nothing)?$/i.test(d[1].trim()) ? [] : d[1].split(/[,\s]+/).filter(Boolean);
     } else if (line.trim() === "") {
       // keep body going across blank lines only if next line is indented
     } else {
@@ -201,6 +210,16 @@ function parsePlan(planPath) {
 
 function nextOpenTask(plan) {
   return plan.tasks.find((t) => t.status === "open") || null;
+}
+
+// Open tasks whose dependencies are all closed, in plan order.
+function runnableTasks(plan) {
+  const closed = new Set(plan.tasks.filter((t) => t.status !== "open").map((t) => t.id));
+  return plan.tasks.filter((t) => {
+    if (t.status !== "open") return false;
+    if (t.deps === null) return plan.tasks.slice(0, t.index).every((e) => e.status !== "open");
+    return t.deps.every((d) => closed.has(d));
+  });
 }
 
 function countTasks(plan) {
@@ -273,8 +292,9 @@ function effortFor(cfg, role) {
   return cfg.effort || "";
 }
 
-function runClaude(proj, prompt, kind, verify = "") {
-  const { cfg, root, logsDir } = proj;
+function runClaude(proj, prompt, kind, verify = "", cwd = "") {
+  const { cfg, logsDir } = proj;
+  const root = cwd || proj.root;
   const model = modelFor(cfg, roleOf(kind));
   const effort = effortFor(cfg, roleOf(kind));
   ensureDir(logsDir);
@@ -476,7 +496,7 @@ function killTree(pid) {
 // Session kinds
 // ---------------------------------------------------------------------------
 
-async function workerSession(proj, plan, task) {
+async function workerSession(proj, plan, task, cwd = "") {
   const vars = {
     ...baseVars(proj, plan),
     TASK_ID: task.id,
@@ -484,7 +504,95 @@ async function workerSession(proj, plan, task) {
     TASK_RAW: task.raw,
     TASK_BODY: task.body.length ? task.body.map((l) => `  ${l}`).join("\n") : "  (no details)",
   };
-  return runClaude(proj, render(loadPrompt("worker"), vars), `worker-${task.id}`, vars.VERIFY);
+  return runClaude(proj, render(loadPrompt("worker"), vars), `worker-${task.id}`, vars.VERIFY, cwd);
+}
+
+// ---------------------------------------------------------------------------
+// Parallel workers: one git worktree per task, merged back in plan order
+// ---------------------------------------------------------------------------
+
+function worktreeFor(proj, task) {
+  const dir = path.join(os.tmpdir(), `relay-wt-${path.basename(proj.root)}-${task.id}-${process.pid}`);
+  const branch = `relay/${task.id}`;
+  git(proj.root, ["worktree", "remove", "--force", dir]);
+  git(proj.root, ["branch", "-D", branch]);
+  const r = git(proj.root, ["worktree", "add", "-b", branch, dir, "HEAD"]);
+  if (!r.ok) throw new Error(`git worktree add failed: ${r.err}`);
+  return { dir, branch };
+}
+
+function dropWorktree(proj, wt) {
+  git(proj.root, ["worktree", "remove", "--force", wt.dir]);
+  git(proj.root, ["branch", "-D", wt.branch]);
+}
+
+// Merge a finished task branch into the main worktree. Conflicts limited to the
+// plan/handoff files are resolved automatically (tick re-applied, newest handoff
+// wins); any other conflict aborts the merge and reports the files.
+function mergeTaskBranch(proj, task, wt) {
+  const rel = (p) => path.relative(proj.root, p).split(path.sep).join("/");
+  const planRel = rel(proj.planPath);
+  const handoffRel = rel(proj.handoffPath);
+  const m = git(proj.root, ["merge", "--no-edit", "-m", `merge ${task.id} (${wt.branch})`, wt.branch]);
+  if (m.ok) return { ok: true };
+  const conflicted = git(proj.root, ["diff", "--name-only", "--diff-filter=U"]).out.split("\n").filter(Boolean);
+  const others = conflicted.filter((f) => f !== planRel && f !== handoffRel);
+  if (others.length) {
+    git(proj.root, ["merge", "--abort"]);
+    return { ok: false, files: others };
+  }
+  if (conflicted.includes(planRel)) {
+    git(proj.root, ["checkout", "--ours", "--", planRel]);
+    const text = readText(proj.planPath);
+    const ticked = text.replace(`- [ ] ${task.raw}`, `- [x] ${task.raw}`);
+    fs.writeFileSync(proj.planPath, ticked);
+    git(proj.root, ["add", "--", planRel]);
+  }
+  if (conflicted.includes(handoffRel)) {
+    git(proj.root, ["checkout", "--theirs", "--", handoffRel]);
+    git(proj.root, ["add", "--", handoffRel]);
+  }
+  const c = git(proj.root, ["commit", "--no-edit", "-m", `merge ${task.id} (${wt.branch})`]);
+  return c.ok ? { ok: true, resolved: conflicted } : (git(proj.root, ["merge", "--abort"]), { ok: false, files: conflicted });
+}
+
+// Run a batch of independent tasks concurrently. Returns per-task outcomes.
+async function runParallelBatch(proj, plan, tasks) {
+  const started = tasks.map((task) => {
+    try {
+      const wt = worktreeFor(proj, task);
+      return { task, wt, base: gitHead(proj.root), promise: workerSession(proj, plan, task, wt.dir) };
+    } catch (e) {
+      return { task, error: e };
+    }
+  });
+  const results = [];
+  for (const s of started) {
+    if (s.error) {
+      results.push({ task: s.task, outcome: "failed", why: String(s.error.message || s.error), res: null });
+      continue;
+    }
+    const res = await s.promise;
+    const planPathInWt = path.join(s.wt.dir, path.relative(proj.root, proj.planPath));
+    const after = exists(planPathInWt) ? parsePlan(planPathInWt) : { tasks: [] };
+    const afterTask = after.tasks.find((t) => t.id === s.task.id) || after.tasks[s.task.index];
+    const ticked = afterTask && afterTask.status === "done";
+    const skipped = afterTask && afterTask.status === "skipped";
+    const committed = gitHead(s.wt.dir) !== s.base;
+    if (!res.isError && ticked && (!proj.cfg.commitRequired || committed)) {
+      const merged = mergeTaskBranch(proj, s.task, s.wt);
+      if (merged.ok) results.push({ task: s.task, outcome: "done", res, why: merged.resolved ? `merged (auto-resolved ${merged.resolved.join(", ")})` : "merged" });
+      else results.push({ task: s.task, outcome: "conflict", res, why: `merge conflict in ${merged.files.join(", ")}; will retry alone` });
+    } else if (skipped && committed) {
+      const merged = mergeTaskBranch(proj, s.task, s.wt);
+      results.push({ task: s.task, outcome: merged.ok ? "skipped" : "conflict", res, why: merged.ok ? "worker marked task as blocked [-]" : `merge conflict in ${merged.files.join(", ")}` });
+    } else {
+      const why = res.timedOut ? "timeout" : res.rateLimited ? "rate-limited" : res.isError ? `exit ${res.code}` : !ticked ? "task not ticked" : "no commit";
+      results.push({ task: s.task, outcome: "failed", res, why });
+    }
+    dropWorktree(proj, s.wt);
+  }
+  return results;
 }
 
 function unreviewedRange(proj, state) {
@@ -829,6 +937,7 @@ async function cmdRun(proj, flags) {
 
   log(`runner start — agent ${cfg.agent}, plan ${path.relative(proj.root, proj.planPath)}, timeout ${cfg.sessionTimeoutMinutes}m/session`);
   log(`models: ${describeModels(cfg)}`);
+  if (cfg.parallel > 1) log(`parallel: up to ${cfg.parallel} workers in git worktrees (tasks need "Depends:" lines to run together)`);
 
   for (;;) {
     const st = loadState(proj.statePath);
@@ -908,6 +1017,54 @@ async function cmdRun(proj, flags) {
       continue;
     }
 
+    // Parallel workers (opt-in): run every runnable independent task at once.
+    const conflicted = new Set(st.conflicted || []);
+    const batch = cfg.parallel > 1 && !dry ? runnableTasks(plan).filter((t) => !conflicted.has(t.id)).slice(0, cfg.parallel) : [];
+    if (batch.length > 1 || (batch.length === 1 && batch[0].id !== task.id)) {
+      log(`parallel batch: ${batch.map((t) => t.id).join(", ")}`);
+      const results = await runParallelBatch(proj, plan, batch);
+      let failures = 0;
+      let worst = null;
+      const doneIds = [];
+      for (const r of results) {
+        record(st, `worker ${r.task.id}`, r.outcome === "conflict" ? "failed" : r.outcome, r.res, r.why);
+        if (r.outcome === "done") {
+          st.completedSinceReview++;
+          doneIds.push(r.task.id);
+          log(`task ${r.task.id} done${r.res?.costUsd ? ` ($${r.res.costUsd.toFixed(2)})` : ""} — ${r.why}`);
+        } else if (r.outcome === "skipped") log(`task ${r.task.id} marked blocked by worker; moving on`);
+        else if (r.outcome === "conflict") {
+          conflicted.add(r.task.id);
+          log(`task ${r.task.id}: ${r.why}`);
+        } else {
+          failures++;
+          worst = worst?.rateLimited ? worst : r.res;
+          log(`task ${r.task.id} failed (${r.why})`);
+          if (r.res?.fatal || r.res?.denials?.length) worst = r.res;
+        }
+      }
+      st.conflicted = [...conflicted];
+      if (doneIds.length) st.consecutiveFailures = 0;
+      writeJson(proj.statePath, st);
+      const verifyCmd = cfg.verify || plan.verify;
+      if (doneIds.length > 1 && verifyCmd) {
+        const v = spawnSync(verifyCmd, { cwd: proj.root, shell: true, encoding: "utf8" });
+        if (v.status !== 0) {
+          const n = 1 + plan.tasks.filter((t) => /^M\d+$/.test(t.id)).length;
+          log(`verify failed after merging ${doneIds.join(", ")}; adding fix task M${n}`);
+          fs.appendFileSync(proj.planPath, `- [ ] M${n}: fix \`${verifyCmd}\` after merging ${doneIds.join(", ")} (the tasks passed alone; their combination does not)\n  - Accept: \`${verifyCmd}\` passes\n  - Depends: ${doneIds.join(", ")}\n`);
+          git(proj.root, ["commit", "-q", "-m", `plan: add M${n} (post-merge verify failed)`, "--", path.relative(proj.root, proj.planPath)]);
+        }
+      }
+      if (worst?.fatal || worst?.denials?.length) {
+        log(`a worker failed with a configuration/permission error; stopping: ${worst.denials?.length ? worst.denials.join(", ") : worst.resultText.trim().split("\n")[0].slice(0, 300)}`);
+        break;
+      }
+      if (failures && !doneIds.length && (await handleFailure(proj, st, worst || {}, "batch failed"))) break;
+      if (once) break;
+      continue;
+    }
+
     // Worker
     log(`task ${task.id}: ${task.title}`);
     if (dry) {
@@ -929,6 +1086,7 @@ async function cmdRun(proj, flags) {
       record(st, `worker ${task.id}`, "done", res, committed ? "committed" : "no commit");
       st.consecutiveFailures = 0;
       st.completedSinceReview++;
+      if (st.conflicted?.length) st.conflicted = st.conflicted.filter((id) => id !== task.id);
       writeJson(proj.statePath, st);
       log(`task ${task.id} done${res.costUsd ? ` ($${res.costUsd.toFixed(2)})` : ""}`);
     } else if (skipped) {
