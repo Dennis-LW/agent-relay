@@ -161,6 +161,7 @@ relay stop                                      停止背景 runner
 | `claude` | `claude` | 所選 preset 的執行檔覆寫（例如完整路徑） |
 | `model` | `""` | session 的模型參數 |
 | `permissionMode` | `acceptEdits` | Claude Code 的 `--permission-mode` |
+| `allowedTools` | `[]` | Claude Code：額外的 `--allowedTools` 規則。`git add/commit/status/diff/log`、`mkdir` 與 verify 指令永遠放行，因為無人值守的 session 沒辦法問你 |
 | `extraArgs` | `[]` | 附加到每個 session 的額外 CLI 參數 |
 | `sessionTimeoutMinutes` | `45` | 每個 session 的強制逾時 |
 | `reviewEvery` | `3` | 每完成幾項就審查一次（0 = 不審） |
@@ -173,9 +174,15 @@ relay stop                                      停止背景 runner
 
 ## 權限與安全
 
-session 無人值守執行。Claude Code 用 `--permission-mode acceptEdits`（編輯自動核准，Bash 仍遵守 allow/deny 規則；`"permissionMode": "bypassPermissions"` 只建議在信任的沙箱裡用）。Codex 用 `exec --full-auto`、Gemini 用 `--yolo`，都是各自的無人值守模式。worker 被明確要求不 push、不改寫歷史。
+session 無人值守執行，而 `claude -p` 無頭模式沒辦法跳出權限詢問：沒有事先放行的工具呼叫會被靜默拒絕。所以 runner 一律帶 `--allowedTools` 放行 `git add/commit/status/diff/log`、`mkdir` 與 verify 指令；要更多就在設定的 `allowedTools` 加。若 session 仍被拒絕某個工具，runner 會立刻停下並印出被拒的指令，不會重試燒 token。Claude Code 用 `--permission-mode acceptEdits`（編輯自動核准，其他 Bash 呼叫仍遵守 allow/deny 規則；`"permissionMode": "bypassPermissions"` 只建議在信任的沙箱裡用）。Codex 用 `exec --full-auto`、Gemini 用 `--yolo`，都是各自的無人值守模式。worker 被明確要求不 push、不改寫歷史。
 
 每個 session 的 prompt 與結果都會寫到 `.relay/logs/`。
+
+## 測試與 benchmark
+
+- `npm test` 用 `test/fake-agent.mjs`（一個不呼叫模型、只負責打勾與 commit 的假 agent）把 runner 迴圈整個跑一遍：review gate、acceptance、失敗放棄、權限被拒、rate-limit 偵測、計畫解析。完全不花 token。
+- 每個 session 的 token 與費用都會從 CLI 的 JSON 輸出記進 `.relay/state.json`，`relay status` 會加總顯示。
+- `node bench/bench.mjs` 把同一份計畫分別用 (a) relay 與 (b) 單一長 session 各做 N 次，每次都跑 verify 指令並由一個乾淨的 judge session 評分。它會先印出費用估計，加 `--yes` 才真的花 token。選項見腳本開頭。
 
 ## 限制
 

@@ -3,10 +3,35 @@
   "version": "0.1.0",
   "description": "Run long coding tasks as a relay of short, fresh Claude Code sessions with durable state in git.",
   "type": "module",
-  "bin": { "relay": "skills/relay/scripts/relay.mjs" },
-  "files": ["skills", ".claude-plugin", "README.md", "README.zh-TW.md", "LICENSE"],
-  "engines": { "node": ">=18" },
+  "bin": {
+    "relay": "skills/relay/scripts/relay.mjs"
+  },
+  "files": [
+    "skills",
+    ".claude-plugin",
+    "README.md",
+    "README.zh-TW.md",
+    "LICENSE",
+    "test",
+    "bench"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/Dennis-LW/agent-relay.git" },
-  "keywords": ["claude", "claude-code", "agent", "automation", "relay"]
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Dennis-LW/agent-relay.git"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "agent",
+    "automation",
+    "relay"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "bench": "node bench/bench.mjs"
+  }
 }

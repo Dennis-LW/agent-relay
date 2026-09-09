@@ -78,6 +78,7 @@ If the environment variable `RELAY_KIND` (or `CLAUDE_RELAY`) is set, you were st
 | `claude` | `claude` | executable override for the chosen preset (e.g. a full path) |
 | `model` | `""` | model flag for sessions (empty = CLI default) |
 | `permissionMode` | `acceptEdits` | Claude Code `--permission-mode` |
+| `allowedTools` | `[]` | Claude Code: extra `--allowedTools` rules on top of the always-allowed git verbs, `mkdir` and the verify command (headless sessions cannot ask for permission) |
 | `extraArgs` | `[]` | extra CLI args passed to every session |
 | `sessionTimeoutMinutes` | `45` | hard kill per session |
 | `reviewEvery` | `3` | review session after this many completed tasks (0 = never) |

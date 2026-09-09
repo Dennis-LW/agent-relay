@@ -1,0 +1,48 @@
+#!/usr/bin/env node
+// A token-free stand-in for an agent CLI. Reads the prompt on stdin and acts
+// according to RELAY_KIND and FAKE_MODE so the runner loop can be tested in
+// milliseconds without calling any model.
+//   FAKE_MODE=ok       worker ticks + commits, review appends one R task, accept passes
+//   FAKE_MODE=noop     does nothing (worker "forgot" to tick/commit)
+//   FAKE_MODE=denied   like noop but reports a permission denial for git commit
+//   FAKE_MODE=quota    is_error with a result text mentioning "quota" (must NOT look rate-limited)
+//   FAKE_MODE=ratelimit real Claude Code usage-limit message
+import fs from "node:fs";
+import { execSync } from "node:child_process";
+
+const kind = process.env.RELAY_KIND || "";
+const mode = process.env.FAKE_MODE || "ok";
+fs.readFileSync(0, "utf8"); // consume prompt
+const plan = ".relay/PLAN.md";
+const sh = (c) => execSync(c, { stdio: "pipe" });
+const out = (o) => console.log(JSON.stringify(o));
+const usage = { input_tokens: 10, cache_read_input_tokens: 2000, cache_creation_input_tokens: 500, output_tokens: 300 };
+const okJson = { result: "ok", is_error: false, total_cost_usd: 0.01, num_turns: 3, duration_ms: 1200, usage, modelUsage: { fake: {} } };
+
+function main() {
+if (mode === "noop") return out(okJson);
+if (mode === "denied")
+  return out({ ...okJson, permission_denials: [{ tool_name: "Bash", tool_input: { command: "git add -A && git commit -m 'T1: x'" } }] });
+if (mode === "quota") return out({ result: "Task is to implement a per-user quota check; tests are broken so I stopped.", is_error: true });
+if (mode === "ratelimit") return out({ result: "Claude AI usage limit reached|1757400000", is_error: true });
+
+if (kind.startsWith("worker-")) {
+  const id = kind.slice("worker-".length);
+  fs.writeFileSync(`out-${id}.txt`, `work for ${id}\n`);
+  const s = fs.readFileSync(plan, "utf8");
+  const re = new RegExp(`^- \\[ \\] (${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[:.].*)$`, "m");
+  fs.writeFileSync(plan, s.replace(re, "- [x] $1"));
+  sh(`git add -A && git commit -qm "${id}: done"`);
+  fs.writeFileSync(".relay/HANDOFF.md", `# Handoff\n\ndid ${id}\n`);
+} else if (kind === "review") {
+  fs.mkdirSync(".relay/reviews", { recursive: true });
+  fs.writeFileSync(".relay/reviews/review-test.md", "1 finding\n");
+  fs.appendFileSync(plan, "- [ ] R1: fix something found in review\n  - Accept: out-R1.txt exists\n");
+  sh(`git add -A && git commit -qm "review: 1 findings"`);
+} else if (kind === "accept") {
+  fs.writeFileSync(".relay/ACCEPTANCE.md", "PASS\n");
+  sh(`git add -A && git commit -qm "acceptance: PASS"`);
+}
+out(okJson);
+}
+main();

@@ -161,6 +161,7 @@ relay stop                                      stop a background runner
 | `claude` | `claude` | executable override for the chosen preset (e.g. a full path) |
 | `model` | `""` | model flag for sessions |
 | `permissionMode` | `acceptEdits` | Claude Code `--permission-mode` |
+| `allowedTools` | `[]` | Claude Code: extra `--allowedTools` rules. `git add/commit/status/diff/log`, `mkdir` and the verify command are always allowed, because headless sessions cannot ask |
 | `extraArgs` | `[]` | extra CLI args passed to every session |
 | `sessionTimeoutMinutes` | `45` | hard kill per session |
 | `reviewEvery` | `3` | review after this many tasks (0 = never) |
@@ -173,9 +174,15 @@ relay stop                                      stop a background runner
 
 ## Permissions and safety
 
-Sessions run headless. Claude Code uses `--permission-mode acceptEdits` (edits auto-approved, Bash still follows your allow/deny rules; set `"permissionMode": "bypassPermissions"` only inside a sandbox you trust). Codex runs `exec --full-auto` and Gemini runs `--yolo`, which are their unattended modes. Workers are told never to push and never to rewrite history.
+Sessions run headless, and a headless `claude -p` session cannot ask for permission: any tool call that is not pre-allowed is silently denied. The runner therefore always passes `--allowedTools` for `git add/commit/status/diff/log`, `mkdir` and the verify command; add more through `allowedTools` in the config. If a session is still denied a tool, the runner stops at once and prints the denied command instead of retrying. Claude Code uses `--permission-mode acceptEdits` (edits auto-approved, other Bash calls follow your allow/deny rules; set `"permissionMode": "bypassPermissions"` only inside a sandbox you trust). Codex runs `exec --full-auto` and Gemini runs `--yolo`, which are their unattended modes. Workers are told never to push and never to rewrite history.
 
 Every session's prompt and result are written to `.relay/logs/`.
+
+## Testing and benchmarking
+
+- `npm test` runs the runner loop end to end against `test/fake-agent.mjs`, a stand-in agent that ticks and commits without calling a model. It covers the review gate, acceptance, failure/give-up, permission denials, rate-limit detection and plan parsing. No tokens are spent.
+- Every session's tokens and cost are recorded in `.relay/state.json` (from the CLI's JSON output) and summed by `relay status`.
+- `node bench/bench.mjs` builds the same plan as (a) a relay and (b) one long session, N times each, then runs the verify command and a clean judge session on every result. It prints a cost estimate and only spends tokens with `--yes`. See the header of the script for options.
 
 ## Limits
 

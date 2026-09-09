@@ -24,6 +24,9 @@ const DEFAULT_CONFIG = {
   claude: "claude", // executable override for the selected preset
   model: "",
   permissionMode: "acceptEdits", // claude only
+  // claude only: extra --allowedTools rules. Headless `-p` sessions cannot ask for
+  // permission, so git and the verify command are always allowed (see claudeAllowedTools).
+  allowedTools: [],
   extraArgs: [],
   sessionTimeoutMinutes: 45,
   reviewEvery: 3,
@@ -130,10 +133,18 @@ function parsePlan(planPath) {
   const tasks = [];
   let cur = null;
   let inTasks = false;
+  let tasksLevel = 0; // heading level of the "Tasks" section; deeper headings stay inside it
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    if (/^#{1,6}\s/.test(line)) {
-      inTasks = /^#{1,6}\s+tasks?\b/i.test(line);
+    const h = line.match(/^(#{1,6})\s+(.*)$/);
+    if (h) {
+      const level = h[1].length;
+      if (/\btasks?\b/i.test(h[2])) {
+        inTasks = true;
+        tasksLevel = level;
+      } else if (!inTasks || level <= tasksLevel) {
+        inTasks = false;
+      }
       cur = null;
       continue;
     }
@@ -214,16 +225,18 @@ function baseVars(proj, plan) {
 // Running one Claude session
 // ---------------------------------------------------------------------------
 
-const RATE_LIMIT_RE = /rate.?limit|usage.?limit|limit reached|too many requests|\b429\b|overloaded|resets? (at|in)|quota|capacity/i;
+// Deliberately narrow: a worker whose *task* is about quotas or rate limits must not
+// trigger the long exponential backoff. Matches the actual CLI/API error strings.
+const RATE_LIMIT_RE = /usage limit reached|rate_limit_error|rate.?limit(?:ed)?\s+(?:reached|exceeded|hit)|too many requests|\b429\b|overloaded_error/i;
 
-function runClaude(proj, prompt, kind) {
+function runClaude(proj, prompt, kind, verify = "") {
   const { cfg, root, logsDir } = proj;
   ensureDir(logsDir);
   const stamp = fileTs();
   const logBase = path.join(logsDir, `${stamp}-${kind}`);
   fs.writeFileSync(`${logBase}.prompt.md`, prompt);
 
-  const { exe, args, viaStdin } = agentCommand(cfg, prompt);
+  const { exe, args, viaStdin } = agentCommand(cfg, prompt, verify);
 
   return new Promise((resolve) => {
     const child = spawn(exe, args, {
@@ -257,17 +270,22 @@ function runClaude(proj, prompt, kind) {
       }
       const resultText = parsed?.result ?? stdout;
       const isError = code !== 0 || timedOut || parsed?.is_error === true;
-      const rateLimited = RATE_LIMIT_RE.test(stderr) || (isError && RATE_LIMIT_RE.test(resultText));
+      const rateLimited = RATE_LIMIT_RE.test(stderr) || (isError && RATE_LIMIT_RE.test(resultText.slice(0, 300)));
+      const denials = (parsed?.permission_denials || []).map((d) => `${d.tool_name}(${d.tool_input?.command || JSON.stringify(d.tool_input || {})})`);
+      const usage = summariseUsage(parsed);
       fs.writeFileSync(
         `${logBase}.result.md`,
-        `# ${kind} — ${stamp}\n\nexit: ${code}  timedOut: ${timedOut}  rateLimited: ${rateLimited}\n\n## stdout\n\n${resultText}\n\n## stderr\n\n${stderr}\n`,
+        `# ${kind} — ${stamp}\n\nexit: ${code}  timedOut: ${timedOut}  rateLimited: ${rateLimited}\n` +
+          `usage: ${usage ? JSON.stringify(usage) : "(not reported)"}\n` +
+          (denials.length ? `permission denials: ${denials.join(", ")}\n` : "") +
+          `\n## stdout\n\n${resultText}\n\n## stderr\n\n${stderr}\n`,
       );
-      resolve({ code, timedOut, isError, rateLimited, resultText, stderr, costUsd: parsed?.total_cost_usd, logBase });
+      resolve({ code, timedOut, isError, rateLimited, resultText, stderr, costUsd: parsed?.total_cost_usd, usage, denials, logBase });
     });
     child.on("error", (e) => {
       clearTimeout(timer);
       fs.writeFileSync(`${logBase}.result.md`, `# ${kind} — spawn error\n\n${e.stack || e}\n`);
-      resolve({ code: -1, timedOut: false, isError: true, rateLimited: false, resultText: "", stderr: String(e), logBase });
+      resolve({ code: -1, timedOut: false, isError: true, rateLimited: false, resultText: "", stderr: String(e), usage: null, denials: [], logBase });
     });
   });
 }
@@ -275,16 +293,27 @@ function runClaude(proj, prompt, kind) {
 // Build the argv for the configured agent CLI. Success is judged by side
 // effects (tick + commit), so any CLI that can edit files and run commands
 // unattended works here.
-function agentCommand(cfg, prompt) {
+function agentCommand(cfg, prompt, verify = "") {
   const extra = cfg.extraArgs || [];
   const model = cfg.model ? ["--model", cfg.model] : [];
   switch (cfg.agent) {
-    case "claude":
+    case "claude": {
+      const allowed = claudeAllowedTools(cfg, verify);
       return {
         exe: cfg.claude || "claude",
-        args: ["-p", "--output-format", "json", "--permission-mode", cfg.permissionMode, ...model, ...extra],
+        args: [
+          "-p",
+          "--output-format",
+          "json",
+          "--permission-mode",
+          cfg.permissionMode,
+          ...(allowed.length ? ["--allowedTools", allowed.join(" ")] : []),
+          ...model,
+          ...extra,
+        ],
         viaStdin: true,
       };
+    }
     case "codex":
       // OpenAI Codex CLI: `codex exec` runs non-interactively; "-" reads the prompt from stdin.
       return {
@@ -308,6 +337,51 @@ function agentCommand(cfg, prompt) {
     default:
       throw new Error(`unknown agent "${cfg.agent}" (claude | codex | gemini | custom)`);
   }
+}
+
+// In `claude -p` nobody can approve a permission prompt, so every Bash call that
+// is not pre-allowed is silently denied. acceptEdits only covers file edits; the
+// worker would create files but never commit. Allow the git verbs the contract
+// requires, the verify command, and whatever the user adds in `allowedTools`.
+function claudeAllowedTools(cfg, verify) {
+  if (cfg.permissionMode === "bypassPermissions") return [];
+  const rules = new Set([
+    "Bash(git add:*)",
+    "Bash(git commit:*)",
+    "Bash(git status:*)",
+    "Bash(git diff:*)",
+    "Bash(git log:*)",
+    "Bash(git show:*)",
+    "Bash(git checkout -- :*)",
+    "Bash(git restore:*)",
+    "Bash(mkdir:*)",
+  ]);
+  const v = (verify || "").trim();
+  if (v && !v.startsWith("(")) {
+    rules.add(`Bash(${v})`);
+    rules.add(`Bash(${v}:*)`);
+  }
+  for (const r of cfg.allowedTools || []) rules.add(r);
+  return [...rules];
+}
+
+// Pull the token/cost numbers out of `claude -p --output-format json` (other
+// agents that print a similar object get the same treatment; otherwise null).
+function summariseUsage(parsed) {
+  if (!parsed || typeof parsed !== "object") return null;
+  const u = parsed.usage || {};
+  const has = ["input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"].some((k) => k in u);
+  if (!has && parsed.total_cost_usd == null) return null;
+  return {
+    input: u.input_tokens || 0,
+    cacheRead: u.cache_read_input_tokens || 0,
+    cacheWrite: u.cache_creation_input_tokens || 0,
+    output: u.output_tokens || 0,
+    turns: parsed.num_turns ?? null,
+    durationMs: parsed.duration_ms ?? null,
+    costUsd: parsed.total_cost_usd ?? null,
+    models: Object.keys(parsed.modelUsage || {}),
+  };
 }
 
 // Claude Code refuses to start when it thinks it is nested inside another
@@ -345,20 +419,25 @@ async function workerSession(proj, plan, task) {
     TASK_RAW: task.raw,
     TASK_BODY: task.body.length ? task.body.map((l) => `  ${l}`).join("\n") : "  (no details)",
   };
-  return runClaude(proj, render(loadPrompt("worker"), vars), `worker-${task.id}`);
+  return runClaude(proj, render(loadPrompt("worker"), vars), `worker-${task.id}`, vars.VERIFY);
 }
 
 async function reviewSession(proj, plan, state) {
   const head = gitHead(proj.root);
   const since = state.lastReviewHead || "";
-  const range = since ? `${since}..${head}` : `HEAD~${Math.max(1, state.completedSinceReview)}..HEAD`;
+  // Without a recorded review head, count real commits since the runner started
+  // (a worker may make more than one commit per task, so task count is not enough).
+  const fallback = state.runStartHead && state.runStartHead !== head ? state.runStartHead : `HEAD~${Math.max(1, state.completedSinceReview)}`;
+  const range = since ? `${since}..${head}` : `${fallback}..HEAD`;
   const vars = { ...baseVars(proj, plan), COMMIT_RANGE: range };
-  const res = await runClaude(proj, render(loadPrompt("review"), vars), "review");
-  return { res, head };
+  const res = await runClaude(proj, render(loadPrompt("review"), vars), "review", vars.VERIFY);
+  // The review session commits its own report; the next review must start after it.
+  return { res, head: res.isError ? head : gitHead(proj.root) };
 }
 
 async function acceptanceSession(proj, plan) {
-  return runClaude(proj, render(loadPrompt("accept"), baseVars(proj, plan)), "accept");
+  const vars = baseVars(proj, plan);
+  return runClaude(proj, render(loadPrompt("accept"), vars), "accept", vars.VERIFY);
 }
 
 // ---------------------------------------------------------------------------
@@ -410,14 +489,37 @@ function cmdStatus(proj) {
   console.log(`Runner:   ${alive ? `running (pid ${pid})` : "not running"}`);
   console.log(`Failures: ${state.consecutiveFailures} consecutive; ${state.completedSinceReview} done since last review`);
   if (state.runs.length) {
+    const tot = usageTotals(state.runs);
+    if (tot.sessions) {
+      console.log(
+        `Usage:    ${tot.sessions} sessions, $${tot.costUsd.toFixed(2)}; tokens in ${fmtK(tot.input)} / cache-read ${fmtK(tot.cacheRead)} / cache-write ${fmtK(tot.cacheWrite)} / out ${fmtK(tot.output)}`,
+      );
+    }
     console.log("Recent runs:");
-    for (const r of state.runs.slice(-5)) console.log(`  ${r.at}  ${r.kind.padEnd(14)} ${r.outcome}${r.note ? "  " + r.note : ""}`);
+    for (const r of state.runs.slice(-5)) {
+      const cost = r.costUsd != null ? `  $${r.costUsd.toFixed(2)}` : "";
+      const tok = r.tokens ? `  out ${fmtK(r.tokens.output)}${r.turns != null ? ` / ${r.turns} turns` : ""}` : "";
+      console.log(`  ${r.at}  ${r.kind.padEnd(14)} ${r.outcome}${cost}${tok}${r.note ? "  " + r.note : ""}`);
+    }
   }
   if (exists(proj.handoffPath)) {
     console.log("\n--- HANDOFF ---");
     console.log(readText(proj.handoffPath).trim());
   }
 }
+
+function usageTotals(runs) {
+  const t = { sessions: 0, costUsd: 0, input: 0, cacheRead: 0, cacheWrite: 0, output: 0 };
+  for (const r of runs) {
+    if (r.costUsd == null && !r.tokens) continue;
+    t.sessions++;
+    t.costUsd += r.costUsd || 0;
+    if (r.tokens) for (const k of ["input", "cacheRead", "cacheWrite", "output"]) t[k] += r.tokens[k] || 0;
+  }
+  return t;
+}
+
+const fmtK = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
 
 function cmdNext(proj) {
   const plan = parsePlan(proj.planPath);
@@ -476,6 +578,7 @@ async function cmdRun(proj, flags) {
   const state = loadState(proj.statePath);
   state.stopped = false;
   state.consecutiveFailures = 0; // a fresh `relay run` is a fresh chance
+  if (!state.lastReviewHead) state.runStartHead = gitHead(proj.root);
   writeJson(proj.statePath, state);
   const once = !!flags.once;
   const dry = !!flags["dry-run"];
@@ -558,7 +661,7 @@ async function cmdRun(proj, flags) {
     log(`task ${task.id}: ${task.title}`);
     if (dry) {
       log("(dry-run) would run worker session; prompt preview:");
-      const vars = { ...baseVars(proj, plan), TASK_ID: task.id, TASK_TITLE: task.title, TASK_RAW: task.raw, TASK_BODY: task.body.join("\n") };
+      const vars = { ...baseVars(proj, plan), TASK_ID: task.id, TASK_TITLE: task.title, TASK_RAW: task.raw, TASK_BODY: task.body.map((l) => `  ${l}`).join("\n") };
       console.log(render(loadPrompt("worker"), vars));
       break;
     }
@@ -585,6 +688,15 @@ async function cmdRun(proj, flags) {
     } else {
       const why = res.timedOut ? "timeout" : res.rateLimited ? "rate-limited" : res.isError ? `exit ${res.code}` : !ticked ? "task not ticked" : "no commit";
       record(st, `worker ${task.id}`, "failed", res, why);
+      if (res.denials?.length) {
+        // Retrying cannot help: the same tool call will be denied again. Stop and
+        // tell the user what to allow instead of burning sessions.
+        log(`task ${task.id} failed (${why}); the session was DENIED permission for: ${res.denials.join(", ")}`);
+        log(`add the needed rules to .relay/config.json "allowedTools" (or the project's settings.json), then \`relay run\` again`);
+        st.consecutiveFailures++;
+        writeJson(proj.statePath, st);
+        break;
+      }
       if (await handleFailure(proj, st, res, why)) break;
     }
     if (once) break;
@@ -593,7 +705,18 @@ async function cmdRun(proj, flags) {
 }
 
 function record(state, kind, outcome, res, note) {
-  state.runs.push({ at: ts(), kind, outcome, note: note || "", log: res?.logBase ? path.basename(res.logBase) : "" });
+  const u = res?.usage;
+  state.runs.push({
+    at: ts(),
+    kind,
+    outcome,
+    note: note || "",
+    log: res?.logBase ? path.basename(res.logBase) : "",
+    costUsd: u?.costUsd ?? res?.costUsd ?? null,
+    tokens: u ? { input: u.input, cacheRead: u.cacheRead, cacheWrite: u.cacheWrite, output: u.output } : null,
+    turns: u?.turns ?? null,
+    durationMs: u?.durationMs ?? null,
+  });
   if (state.runs.length > 200) state.runs = state.runs.slice(-200);
 }
 
