@@ -230,7 +230,7 @@ function runClaude(proj, prompt, kind) {
       cwd: root,
       shell: IS_WIN, // resolves claude.cmd on Windows
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, CLAUDE_RELAY: "1", CLAUDE_RELAY_KIND: kind },
+      env: { ...childEnv(), CLAUDE_RELAY: "1", CLAUDE_RELAY_KIND: kind },
     });
     let stdout = "";
     let stderr = "";
@@ -269,6 +269,15 @@ function runClaude(proj, prompt, kind) {
       resolve({ code: -1, timedOut: false, isError: true, rateLimited: false, resultText: "", stderr: String(e), logBase });
     });
   });
+}
+
+// Claude Code refuses to start when it thinks it is nested inside another
+// Claude Code session (CLAUDECODE env var). The runner is often launched from
+// inside a session via /relay run, so strip those markers for children.
+function childEnv() {
+  const env = { ...process.env };
+  for (const k of Object.keys(env)) if (k === "CLAUDECODE" || k.startsWith("CLAUDE_CODE_")) delete env[k];
+  return env;
 }
 
 function killTree(pid) {
@@ -409,6 +418,7 @@ function cmdDetach(proj, argv) {
     detached: true,
     stdio: ["ignore", out, out],
     windowsHide: true,
+    env: childEnv(),
   });
   child.unref();
   log(`runner started in background (pid ${child.pid}); output -> ${path.relative(proj.root, outPath)}`);
